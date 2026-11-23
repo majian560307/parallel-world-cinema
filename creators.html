@@ -772,7 +772,7 @@ function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value
          en:{wait:'Sending…',ok:'Received by the cinema inbox — a programmer will reach out ✦',net:'Network issue — retry later or email yanaranft@gmail.com',fill:'Title and link are required'},
          ja:{wait:'送信中…',ok:'シアターの受信箱に届きました ✦',net:'通信エラー。後でもう一度、または yanaranft@gmail.com へ',fill:'タイトルとリンクは必須です'},
          ko:{wait:'보내는 중…',ok:'극장 메일함으로 접수되었습니다 ✦',net:'네트워크 오류 — 잠시 후 재시도 또는 yanaranft@gmail.com',fill:'제목과 링크는 필수입니다'}};
-  function L(){ var l=(localStorage.getItem('pc_lang')||'zh').slice(0,2); return T[l]||T.zh; }
+  function L(){ var c=(document.cookie.match(/(?:^|; )pc_lang=([a-zA-Z]+)/)||[])[1]; var l=((c||localStorage.getItem('pc_lang')||'zh')).slice(0,2); return T[l]||T.zh; }
   f.addEventListener('submit',function(ev){
     ev.preventDefault();
     var d={type:document.getElementById('pf-type').value,
