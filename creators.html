@@ -434,6 +434,25 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
   .plays{grid-template-columns:1fr}
   nav a:not(.cta){display:none}
 }
+/* ============ fast submit form ============ */
+.pwc-form{max-width:640px;margin:clamp(30px,4.6vh,48px) auto 0;padding:clamp(22px,3vw,34px);
+  background:rgba(10,8,6,.55);backdrop-filter:blur(10px);border:1px solid var(--line-warm);
+  border-radius:var(--r);box-shadow:0 18px 50px rgba(0,0,0,.45);text-align:left}
+.pwc-form h3{margin:0 0 4px}
+.pwc-form h3 .en{display:block;font-size:11px;letter-spacing:.3em;color:var(--dim);text-transform:uppercase;margin-top:6px}
+.pwc-tip{font-size:13px;color:var(--dim);margin:0 0 18px}
+.pwc-form label{display:block;font-size:13px;letter-spacing:.08em;color:#cfc6ae;margin:14px 0 0}
+.pwc-form input,.pwc-form select,.pwc-form textarea{display:block;width:100%;margin-top:7px;padding:11px 14px;
+  background:rgba(255,255,255,.04);border:1px solid var(--line-warm);border-radius:var(--r-sm);
+  color:#f4f0e6;font:inherit;font-size:14.5px;outline:none;transition:border-color .2s,box-shadow .2s}
+.pwc-form input:focus,.pwc-form select:focus,.pwc-form textarea:focus{border-color:var(--amber);box-shadow:0 0 0 3px rgba(212,175,106,.15)}
+.pwc-form select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--amber) 50%),linear-gradient(135deg,var(--amber) 50%,transparent 50%);
+  background-position:calc(100% - 18px) 50%,calc(100% - 12px) 50%;background-size:6px 6px;background-repeat:no-repeat}
+.pwc-form select option{background:#14100a;color:#f4f0e6}
+.pwc-form textarea{resize:vertical;min-height:70px}
+.pwc-msg{min-height:20px;font-size:13.5px;margin:16px 0 10px;color:#9ef0e7}
+.pwc-msg.err{color:#ff9d8a}
+.pwc-form button:disabled{opacity:.55;cursor:wait}
 </style>
 </head>
 <body>
@@ -539,7 +558,7 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
           <li>观影消耗<b>逐笔记回作者名下</b>，藏品编号即出处</li>
           <li>免费预告 + 热映排片 + Steam 商店页曝光</li>
         </ul>
-        <p class="cta-row"><a href="mailto:yanaranft@gmail.com?subject=投稿放映">投稿放映 →</a></p>
+        <p class="cta-row"><a href="#submitform" onclick="pwcPickType('film')">投稿放映 →</a></p>
       </div>
       <div class="stub game corners rise">
         <h3>开源游戏社区</h3><p class="sub">GAME · 进街区开店</p>
@@ -548,10 +567,27 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
           <li>投稿附 <b>game.json</b> + 三个回调（进入 / 成绩 / 事件）即可接入</li>
           <li>共享身份、通证与位移——曝光渠道换统一接入标准</li>
         </ul>
-        <p class="cta-row"><a href="mailto:yanaranft@gmail.com?subject=投稿街区">投稿街区 →</a></p>
+        <p class="cta-row"><a href="#submitform" onclick="pwcPickType('game')">投稿街区 →</a></p>
       </div>
     </div>
     <p class="stub-note">收件箱 <a class="cyan" href="mailto:yanaranft@gmail.com">yanaranft@gmail.com</a> · 管理员咨询微信 18221126152</p>
+
+    <form class="pwc-form corners rise" id="submitform" novalidate>
+      <h3>极速投稿 <span class="en">Fast Submit</span></h3>
+      <p class="pwc-tip">填 4 项，30 秒直达放映厅收件箱；带 <b>*</b> 必填。</p>
+      <label>作品类型 *
+        <select id="pf-type">
+          <option value="film">影视 · 进放映厅</option>
+          <option value="game">游戏 · 进街区开店</option>
+        </select>
+      </label>
+      <label>作品名 *<input id="pf-name" maxlength="120" placeholder="例：《美与和平》" required></label>
+      <label>作品链接 *<input id="pf-link" type="url" maxlength="500" placeholder="B站 / 网盘 / 官网地址" required></label>
+      <label>联系方式<input id="pf-contact" maxlength="200" placeholder="微信 / 邮箱 / 微博，方便回稿约"></label>
+      <label>一句话简介<textarea id="pf-desc" rows="3" maxlength="2000" placeholder="题材、时长、完成度，让排片人一眼看懂"></textarea></label>
+      <p class="pwc-msg" id="pf-msg" role="status"></p>
+      <button type="submit" class="btn btn-solid btn-hex" id="pf-send">寄出投稿 →</button>
+    </form>
   </div>
 </section>
 
@@ -724,6 +760,36 @@ document.querySelectorAll('.rise').forEach((el,i)=>{
     requestAnimationFrame(tick);
   }
   tick();
+})();
+</script>
+<script>
+/* ===== fast submit → app.osmaigc.com/pc-submit → yanaranft@gmail.com ===== */
+function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value=t; }
+(function(){
+  var f=document.getElementById('submitform'); if(!f) return;
+  var msg=document.getElementById('pf-msg'), btn=document.getElementById('pf-send');
+  var T={zh:{wait:'寄出中…',ok:'已寄达放映厅收件箱，排片人会尽快联系你 ✦',net:'网络不畅，请稍后再试或邮件至 yanaranft@gmail.com',fill:'作品名和作品链接是必填的'},
+         en:{wait:'Sending…',ok:'Received by the cinema inbox — a programmer will reach out ✦',net:'Network issue — retry later or email yanaranft@gmail.com',fill:'Title and link are required'},
+         ja:{wait:'送信中…',ok:'シアターの受信箱に届きました ✦',net:'通信エラー。後でもう一度、または yanaranft@gmail.com へ',fill:'タイトルとリンクは必須です'},
+         ko:{wait:'보내는 중…',ok:'극장 메일함으로 접수되었습니다 ✦',net:'네트워크 오류 — 잠시 후 재시도 또는 yanaranft@gmail.com',fill:'제목과 링크는 필수입니다'}};
+  function L(){ var l=(localStorage.getItem('pc_lang')||'zh').slice(0,2); return T[l]||T.zh; }
+  f.addEventListener('submit',function(ev){
+    ev.preventDefault();
+    var d={type:document.getElementById('pf-type').value,
+           name:document.getElementById('pf-name').value.trim(),
+           link:document.getElementById('pf-link').value.trim(),
+           contact:document.getElementById('pf-contact').value.trim(),
+           desc:document.getElementById('pf-desc').value.trim()};
+    if(!d.name||!d.link){ msg.textContent=L().fill; msg.className='pwc-msg err'; return; }
+    btn.disabled=true; msg.className='pwc-msg'; msg.textContent=L().wait;
+    fetch('https://app.osmaigc.com/pc-submit/',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(d)})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if(j&&j.ok){ msg.textContent=L().ok; msg.className='pwc-msg'; f.reset(); }
+        else { msg.textContent=L().net; msg.className='pwc-msg err'; btn.disabled=false; }
+      })
+      .catch(function(){ msg.textContent=L().net; msg.className='pwc-msg err'; btn.disabled=false; });
+  });
 })();
 </script>
 <script src="i18n_en.json.js"></script>
