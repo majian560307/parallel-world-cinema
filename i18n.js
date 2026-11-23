@@ -6,12 +6,18 @@
   const LANGS = ["zh", "en", "ja", "ko"];
   const LABEL = { zh: "中文", en: "EN", ja: "日本語", ko: "한국어" };
   const KEY = "***";
-  let lang = localStorage.getItem(KEY) || detect();
+  function readCookieLang() {
+    const c = document.cookie.match(/(?:^|; )pc_lang=([a-zA-Z]+)/);
+    return c ? c[1].slice(0, 2).toLowerCase() : null;
+  }
+  function writeCookieLang() {
+    document.cookie = "pc_lang=" + lang + "; path=/; domain=.osmaigc.com; max-age=31536000; SameSite=Lax";
+    try { localStorage.setItem(KEY, lang); } catch (e) {}
+  }
+  let lang = readCookieLang() || localStorage.getItem(KEY) || detect();
   if (!LANGS.includes(lang)) lang = "zh";
 
   function detect() {
-    const saved = localStorage.getItem(KEY);
-    if (saved && LANGS.includes(saved)) return saved;
     const nav = (navigator.language || "zh").toLowerCase();
     if (nav.startsWith("ja")) return "ja";
     if (nav.startsWith("ko")) return "ko";
@@ -121,7 +127,7 @@ header nav a,footer nav a{white-space:nowrap}
     const b = e.target.closest(".lang-btn");
     if (!b) return;
     lang = b.dataset.lang;
-    localStorage.setItem(KEY, lang);
+    writeCookieLang();
     // 还原所有已译节点，再整页重译
     const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let n; while ((n = walk.nextNode())) {
