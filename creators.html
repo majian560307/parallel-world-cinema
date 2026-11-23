@@ -469,6 +469,7 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
     <a href="#lore">世界观</a>
     <a href="#submit">投稿</a>
     <a class="link" href="http://www.osmaigc.com/" target="_blank" rel="noopener" style="margin-right:2px">元宇宙主站 ↗</a>
+    <a class="link" href="https://app.osmaigc.com/pc-submit/account" style="margin-right:2px">我的账号</a>
     <a class="cta" href="index.html#download">预约</a>
   </nav>
 </header>
@@ -782,7 +783,7 @@ function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value
            desc:document.getElementById('pf-desc').value.trim()};
     if(!d.name||!d.link){ msg.textContent=L().fill; msg.className='pwc-msg err'; return; }
     btn.disabled=true; msg.className='pwc-msg'; msg.textContent=L().wait;
-    fetch('https://app.osmaigc.com/pc-submit/',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(d)})
+    fetch('https://app.osmaigc.com/pc-submit/api/submissions',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(d)})
       .then(function(r){ return r.json(); })
       .then(function(j){
         if(j&&j.ok){ msg.textContent=L().ok; msg.className='pwc-msg'; f.reset(); }
