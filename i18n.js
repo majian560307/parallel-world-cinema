@@ -46,6 +46,8 @@
       const n = stack.pop();
       if (n.nodeType === 3) {
         if (n.parentElement && ["SCRIPT", "STYLE", "NOSCRIPT"].includes(n.parentElement.tagName)) continue;
+        // 语言切换器自身的中文/EN/日本語/한국어 标签永远不翻译
+        if (n.parentElement && n.parentElement.closest(".lang-switch,.langs")) continue;
         if (n.__i18n && n.__i18n.lang === lang) continue;
         const rep = t(n.nodeValue);
         if (rep !== null && rep !== n.nodeValue) {
@@ -117,11 +119,11 @@ header nav a,footer nav a{white-space:nowrap}
       if (cta) nav.insertBefore(wrap.firstChild, cta);
       else nav.appendChild(wrap.firstChild);
     });
-    // 页脚 .langs 静态块 → 活切换器
+    // 页脚 .langs 静态块 → 活切换器（包一层 .lang-switch，才能跟着高亮同步）
     document.querySelectorAll(".langs").forEach(box => {
       if (box.querySelector(".lang-btn")) return;
-      box.innerHTML = LANGS.map(l =>
-        `<button type="button" class="lang-btn${l === lang ? " on" : ""}" data-lang="${l}">${LABEL[l]}</button>`).join("");
+      box.innerHTML = `<div class="lang-switch">` + LANGS.map(l =>
+        `<button type="button" class="lang-btn${l === lang ? " on" : ""}" data-lang="${l}">${LABEL[l]}</button>`).join("") + `</div>`;
     });
   }
   document.addEventListener("click", (e) => {
