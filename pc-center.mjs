@@ -237,8 +237,8 @@ errBoth:'이메일과 비밀번호를 입력하세요',errPw:'비밀번호는 6�
 };
 var LANG = (function(){
   var m = document.cookie.match(/(?:^|; )pc_lang=([a-zA-Z]+)/);
-  var l = String(m ? m[1] : (localStorage.getItem('pc_lang') || (navigator.language || 'zh'))).slice(0, 2).toLowerCase();
-  return ['zh','en','ja','ko'].indexOf(l) >= 0 ? l : 'zh';
+  var l = String(m ? m[1] : (localStorage.getItem('pc_lang') || navigator.language || 'en')).slice(0, 2).toLowerCase();
+  return ['zh','en','ja','ko'].indexOf(l) >= 0 ? l : 'en';
 })();
 function t(k){ return (I18N[LANG] || I18N.zh)[k] || I18N.zh[k] || k; }
 function setLang(l){ LANG = l; localStorage.setItem('pc_lang', l); document.cookie = 'pc_lang=' + l + '; path=/; domain=.osmaigc.com; max-age=31536000; SameSite=Lax'; applyLang(); }

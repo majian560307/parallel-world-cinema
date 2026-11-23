@@ -19,10 +19,11 @@
 
   function detect() {
     const nav = (navigator.language || "zh").toLowerCase();
+    // International posture: first-time visitors see EN, incl. zh-CN browsers.
+    // ja/ko visitors keep their native language (it reads as care, not default).
     if (nav.startsWith("ja")) return "ja";
     if (nav.startsWith("ko")) return "ko";
-    if (nav.startsWith("zh")) return "zh";
-    return "en"; // 其他语言默认英文
+    return "en";
   }
   window.__lang = () => lang;
 
