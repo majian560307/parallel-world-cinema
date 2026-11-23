@@ -93,6 +93,12 @@ nav .cta:hover{background:var(--amber);box-shadow:0 4px 22px rgba(212,175,106,.4
   font-size:clamp(15px,1.6vw,18px);text-shadow:0 1px 14px rgba(0,0,0,.95),0 0 3px rgba(0,0,0,.8)}
 .hero .lede em{font-style:normal;color:var(--amber);white-space:nowrap}
 .hero .lede em.c{color:#9ef0e7;white-space:nowrap}
+.hero-logo{display:block;margin:clamp(8px,1.6vh,16px) auto 0;width:min(760px,90vw);
+  filter:drop-shadow(0 6px 30px rgba(0,0,0,.65)) drop-shadow(0 0 34px rgba(212,175,106,.18));
+  animation:logobreathe 5.5s ease-in-out infinite}
+@keyframes logobreathe{0%,100%{transform:scale(1)}50%{transform:scale(1.018)}}
+.hero-h1-hide{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+@media (max-width:720px){.hero-logo{width:min(300px,72vw)}}
 .hero-stats{display:flex;justify-content:center;gap:clamp(12px,2vw,20px);margin-top:clamp(30px,4.8vh,46px);flex-wrap:wrap}
 .hero-stats div{background:rgba(10,8,6,.55);backdrop-filter:blur(8px);border:1px solid var(--line-warm);
   border-radius:var(--r-sm);padding:12px 26px;text-align:center;box-shadow:0 8px 26px rgba(0,0,0,.4)}
@@ -442,7 +448,8 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
     <a href="#residents">角色</a>
     <a href="#pass">通行证</a>
     <a class="link" href="creators.html" style="margin-right:2px">创作者专区</a>
-    <a class="cta" href="#download">下载</a>
+    <a class="link" href="http://www.osmaigc.com/" target="_blank" rel="noopener" style="margin-right:2px">元宇宙主站 ↗</a>
+    <a class="cta" href="#download">预约</a>
   </nav>
 </header>
 
@@ -452,13 +459,18 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
   <div class="beam"></div><div class="grain"></div>
   <div class="hero-copy">
     <div class="hero-eyebrow rise"><p>免费联机 · 观影 × 游玩 · 四语同映</p><span class="rule"></span></div>
-    <h1 class="rise">平行世界电影院</h1>
+    <div class="rise" style="display:flex;justify-content:center;margin-bottom:clamp(10px,1.8vh,16px)">
+      <span style="display:inline-flex;align-items:center;gap:9px;padding:7px 18px;border:1px solid rgba(212,175,106,.55);border-radius:99px;background:rgba(10,8,6,.5);backdrop-filter:blur(8px);font-size:12.5px;letter-spacing:.22em;color:var(--amber)">
+        <span style="width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 10px rgba(212,175,106,.9);animation:ctaglow 2.4s ease-in-out infinite"></span>上线筹备中 · 即将开门迎宾</span>
+    </div>
+    <h1 class="rise hero-h1-hide">平行世界电影院</h1>
+    <img class="hero-logo rise" src="assets/pc-logo.webp" alt="平行世界电影院 · PARALLEL WORLDS CINEMA" />
     <p class="lede rise">一座电影院，两种玩法：<em>看别的宇宙的电影</em>，<em class="c">进别人的小游戏</em>。<br class="soft">
       社区片库持续热映中，看过的每一部都永久落进你的藏品室；<br class="soft">
       约好友同看一间厅，散场走进街区——刚看完的迷宫，转身就走进去。<br>
       免费入场，注册就送 5 张通行证。</p>
     <div class="ctas rise">
-      <a class="btn btn-solid btn-hex" href="#download">免费下载</a>
+      <a class="btn btn-solid btn-hex" href="#download">预约上线通知</a>
       <a class="btn btn-line btn-hex" href="#news">看看最近上了什么</a>
     </div>
     <div class="hero-stats rise">
@@ -474,8 +486,8 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
 <!-- ================= DOWNLOAD ================= -->
 <section id="download" style="border-bottom:1px solid var(--line)">
   <div class="inner">
-    <p class="kicker dia rise">Get In · 下载入场</p>
-    <h2 class="rise">免费进门，先送你 5 张通行证<span class="en">Free To Play · 5 Passes On Entry</span></h2>
+    <p class="kicker dia rise">Get In · 预约入场</p>
+    <h2 class="rise">影院筹备上线，先留个门缝<span class="en">Launching Soon · Leave the Door Ajar</span></h2>
     <div class="dl-grid">
       <div class="dl-card corners rise">
         <p class="dl-plat">STEAM · PC</p>
@@ -655,6 +667,7 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
 
 <!-- ================= FOOTER ================= -->
 <footer>
+  <img src="assets/pc-logo-sm.webp" alt="平行世界电影院" style="width:min(240px,46vw);margin:0 auto 18px;display:block;opacity:.92" />
   <p class="brand">开源元宇宙 · 平行世界电影院</p>
   <p class="brand-en">Open Source Metaverse — Parallel World Cinema</p>
   <nav>
