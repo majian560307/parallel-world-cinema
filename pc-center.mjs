@@ -130,10 +130,10 @@ const PORTAL = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta
 :root{--ink:#0a0806;--ink2:#14100b;--ivory:#ece7dc;--amber:#d4af6a;--amber-hi:#f3dca0;--dim:#8b8272;--line:rgba(212,175,106,.22);--serif:"Noto Serif SC","Songti SC","SimSun",serif;--sans:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 *{box-sizing:border-box}html{background:var(--ink)}
 body{margin:0;min-height:100vh;color:var(--ivory);font:15px/1.7 var(--sans);background:radial-gradient(120% 90% at 50% 0%,rgba(26,20,12,.35) 0%,rgba(10,8,6,.85) 60%),radial-gradient(60% 50% at 85% 100%,rgba(212,175,106,.1),transparent 60%),url("https://global.osmaigc.com/assets/jm_corridor.jpg") center/cover fixed,#0a0806}
-.langs{position:fixed;top:14px;right:16px;z-index:9;display:flex;gap:2px}
-.langs button{background:none;border:0;color:var(--dim);font:11px/1 var(--sans);letter-spacing:.06em;padding:6px 7px;cursor:pointer;transition:color .2s}
-.langs button.on{color:var(--amber-hi)}
-.langs button:hover{color:var(--amber)}
+.langs{position:fixed;top:14px;right:16px;z-index:9;display:inline-flex;gap:6px;align-items:center}
+.lang-btn{font-size:.82rem;letter-spacing:.06em;cursor:pointer;padding:5px 11px;border-radius:999px;color:var(--dim);opacity:.6;white-space:nowrap;background:transparent;border:1px solid transparent;transition:.25s}
+.lang-btn:hover{opacity:1;color:var(--amber)}
+.lang-btn.on{opacity:1;color:var(--amber-hi);border-color:rgba(232,196,118,.5);background:rgba(232,196,118,.08)}
 .wrap{max-width:560px;margin:0 auto;padding:clamp(40px,9vh,90px) 22px 60px}
 .brand{display:flex;align-items:baseline;gap:12px;justify-content:center;margin-bottom:6px}
 .brand h1{font:600 26px/1.3 var(--serif);letter-spacing:.22em;color:var(--ivory);margin:0;text-shadow:0 0 34px rgba(212,175,106,.35)}
@@ -179,7 +179,7 @@ a{color:var(--amber);text-decoration-color:rgba(212,175,106,.4)}
 .r-wait{color:var(--dim);text-align:center;font-size:13px;letter-spacing:.08em;grid-column:1/-1}
 .r-foot{font-size:11px;color:var(--dim);letter-spacing:.06em;text-align:center;margin-top:12px;grid-column:1/-1}
 </style></head><body>
-<div class="langs" id="langs"><button data-l="zh">中文</button><button data-l="en">EN</button><button data-l="ja">日本語</button><button data-l="ko">한글</button></div>
+<div class="langs" id="langs"><button class="lang-btn" data-l="zh">中文</button><button class="lang-btn" data-l="en">EN</button><button class="lang-btn" data-l="ja">日本語</button><button class="lang-btn" data-l="ko">한국어</button></div>
 <div class="wrap">
 <div class="brand"><h1 id="brandH">我的平行世界</h1><span class="en">Parallel World Cinema</span></div>
 <p class="tag" id="tagline"></p>
@@ -241,7 +241,7 @@ var LANG = (function(){
   return ['zh','en','ja','ko'].indexOf(l) >= 0 ? l : 'zh';
 })();
 function t(k){ return (I18N[LANG] || I18N.zh)[k] || I18N.zh[k] || k; }
-function setLang(l){ LANG = l; localStorage.setItem('pc_lang', l); document.cookie = 'pc_lang=' + l + '; path=/; domain=.osmaigc.com; max-age=31536000'; applyLang(); }
+function setLang(l){ LANG = l; localStorage.setItem('pc_lang', l); document.cookie = 'pc_lang=' + l + '; path=/; domain=.osmaigc.com; max-age=31536000; SameSite=Lax'; applyLang(); }
 function applyLang(){
   document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : LANG;
   $('tagline').innerHTML = t('tag'); $('t-in').textContent = t('login'); $('t-up').textContent = t('register');
@@ -249,7 +249,7 @@ function applyLang(){
   $('goBtn').textContent = reg ? t('goReg') : t('goLogin');
   $('outBtn').textContent = t('out'); $('rcap').textContent = t('cap');
   $('mt-mine').textContent = t('mine'); $('mt-all').textContent = t('all'); $('backLink').textContent = t('back');
-  var bs = $('langs').children; for (var i = 0; i < bs.length; i++) bs[i].className = bs[i].getAttribute('data-l') === LANG ? 'on' : '';
+  var bs = $('langs').children; for (var i = 0; i < bs.length; i++) bs[i].className = 'lang-btn' + (bs[i].getAttribute('data-l') === LANG ? ' on' : '');
   if (me) { $('who').textContent = me.email + (adminMode ? ' · ' + t('admin') : ''); resident(); render(true); }
 }
 $('langs').onclick = function(e){ var l = e.target.getAttribute && e.target.getAttribute('data-l'); if (l) setLang(l); };
