@@ -1,0 +1,216 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的平行世界 · 账号门户</title><style>
+:root{--ink:#0a0806;--ink2:#14100b;--ivory:#ece7dc;--amber:#d4af6a;--amber-hi:#f3dca0;--dim:#8b8272;--line:rgba(212,175,106,.22);--serif:"Noto Serif SC","Songti SC","SimSun",serif;--sans:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}html{background:var(--ink)}
+body{margin:0;min-height:100vh;color:var(--ivory);font:15px/1.7 var(--sans);background:radial-gradient(120% 90% at 50% 0%,rgba(26,20,12,.35) 0%,rgba(10,8,6,.85) 60%),radial-gradient(60% 50% at 85% 100%,rgba(212,175,106,.1),transparent 60%),url("https://global.osmaigc.com/assets/jm_corridor.jpg") center/cover fixed,#0a0806}
+.langs{position:fixed;top:14px;right:16px;z-index:9;display:flex;gap:2px}
+.langs button{background:none;border:0;color:var(--dim);font:11px/1 var(--sans);letter-spacing:.06em;padding:6px 7px;cursor:pointer;transition:color .2s}
+.langs button.on{color:var(--amber-hi)}
+.langs button:hover{color:var(--amber)}
+.wrap{max-width:560px;margin:0 auto;padding:clamp(40px,9vh,90px) 22px 60px}
+.brand{display:flex;align-items:baseline;gap:12px;justify-content:center;margin-bottom:6px}
+.brand h1{font:600 26px/1.3 var(--serif);letter-spacing:.22em;color:var(--ivory);margin:0;text-shadow:0 0 34px rgba(212,175,106,.35)}
+.brand .en{font:400 10px/1 var(--sans);letter-spacing:.34em;color:var(--dim);text-transform:uppercase}
+.tag{color:var(--dim);font-size:12.5px;letter-spacing:.18em;text-align:center;margin:0 0 34px}
+.tag b{color:var(--amber);font-weight:500}
+.panel{background:linear-gradient(170deg,rgba(236,231,220,.055),rgba(236,231,220,.02));border:1px solid var(--line);border-radius:18px;padding:26px 26px 24px;box-shadow:0 24px 60px rgba(0,0,0,.45),inset 0 1px 0 rgba(243,220,160,.12)}
+.tabs{display:flex;gap:26px;border-bottom:1px solid rgba(212,175,106,.16);margin:0 0 22px;padding:0 2px}
+.tabs button{position:relative;background:none;border:0;color:var(--dim);font:15px/1 var(--sans);letter-spacing:.14em;padding:8px 2px 12px;cursor:pointer;transition:color .2s}
+.tabs button.on{color:var(--amber-hi)}
+.tabs button::after{content:"";position:absolute;left:8%;right:8%;bottom:-1px;height:2px;background:linear-gradient(90deg,transparent,var(--amber),transparent);opacity:0;transition:opacity .25s}
+.tabs button.on::after{opacity:1}
+input:focus{outline:none;border-color:rgba(212,175,106,.65);box-shadow:0 0 0 3px rgba(212,175,106,.12)}
+input,select{width:100%;padding:12px 15px;background:rgba(10,8,6,.55);border:1px solid rgba(212,175,106,.3);border-radius:11px;color:var(--ivory);font:inherit;font-size:14.5px;transition:border-color .2s,box-shadow .2s}
+::placeholder{color:#6d6455}
+.go{margin-top:20px;width:100%;padding:13px;background:linear-gradient(180deg,var(--amber-hi),var(--amber) 55%,#b08a44);color:#241806;border:0;border-radius:11px;font:600 14.5px/1 var(--sans);letter-spacing:.28em;text-indent:.28em;cursor:pointer;box-shadow:0 6px 22px rgba(212,175,106,.28);transition:transform .15s,filter .15s}
+.go:hover{filter:brightness(1.08)}.go:active{transform:translateY(1px)}
+.go[disabled]{opacity:.55;pointer-events:none}
+.ghost{background:none;border:0;color:var(--dim);letter-spacing:.1em;font-size:13px;cursor:pointer;text-align:center;width:100%;margin-top:14px}
+.ghost:hover{color:var(--amber)}
+.msg{min-height:20px;font-size:13px;color:#ff9d8a;margin-top:12px;text-align:center}
+.hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:18px}
+.hdr .em{color:var(--dim);font-size:12.5px;letter-spacing:.05em}
+.card{border:1px solid rgba(212,175,106,.18);border-radius:14px;padding:15px 17px;margin:12px 0 0;background:linear-gradient(170deg,rgba(236,231,220,.045),rgba(236,231,220,.015));animation:rise .35s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1}}
+.badge{border-radius:99px;font-size:10.5px;letter-spacing:.12em;padding:2.5px 10px;color:#0d0b08;font-weight:600;display:inline-block;vertical-align:1px}
+.meta{font-size:12px;color:var(--dim);letter-spacing:.04em}
+.reply{margin-top:9px;border-left:2px solid var(--amber);padding-left:11px;color:#cfc6ae;font-size:14px}
+.ops{margin-top:12px;display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.ops input{flex:1;min-width:150px;padding:8px 12px;font-size:13px;margin:0}
+.ops select{width:auto;padding:8px 10px;font-size:13px}
+.ops button{background:var(--amber);color:#241806;border:0;border-radius:9px;padding:8px 18px;font-size:13px;letter-spacing:.08em;cursor:pointer}
+a{color:var(--amber);text-decoration-color:rgba(212,175,106,.4)}
+.empty{color:var(--dim);text-align:center;padding:44px 0 26px;letter-spacing:.08em;font-size:14px}
+.skel{opacity:.45;transition:opacity .3s}
+.resident{padding:16px 22px;margin-bottom:22px}
+.r-cap{font:400 10px/1 var(--sans);letter-spacing:.3em;color:var(--dim);text-transform:uppercase;margin-bottom:12px}
+.r-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 10px}
+@media (max-width:480px){.r-grid{grid-template-columns:repeat(2,1fr)}}
+.r-cell{text-align:center}
+.r-num{font:600 22px/1.2 var(--serif);color:var(--amber-hi);text-shadow:0 0 22px rgba(212,175,106,.3)}
+.r-lab{display:block;font-size:11px;letter-spacing:.14em;color:var(--dim);margin-top:3px}
+.r-wait{color:var(--dim);text-align:center;font-size:13px;letter-spacing:.08em;grid-column:1/-1}
+.r-foot{font-size:11px;color:var(--dim);letter-spacing:.06em;text-align:center;margin-top:12px;grid-column:1/-1}
+</style></head><body>
+<div class="langs" id="langs"><button data-l="zh">中文</button><button data-l="en">EN</button><button data-l="ja">日本語</button><button data-l="ko">한글</button></div>
+<div class="wrap">
+<div class="brand"><h1 id="brandH">我的平行世界</h1><span class="en">Parallel World Cinema</span></div>
+<p class="tag" id="tagline"></p>
+<div class="panel" id="auth">
+<div class="tabs"><button id="t-in" class="on"></button><button id="t-up"></button></div>
+<input id="email" type="email" autocomplete="email"><input id="pw" type="password" autocomplete="current-password" style="margin-top:12px">
+<button class="go" id="goBtn"></button><div class="msg" id="msg"></div>
+</div>
+<div id="mine" hidden>
+<div class="hdr"><span class="em" id="who"></span><button class="ghost" style="width:auto;margin:0" id="outBtn"></button></div>
+<div class="panel resident" id="resident"><div class="r-cap" id="rcap"></div><div class="r-grid" id="rgrid"></div></div>
+<div class="tabs" id="mineTabs" hidden style="margin-top:-6px"><button id="mt-mine" class="on"></button><button id="mt-all"></button></div>
+<div id="plist"></div>
+</div>
+<p class="tag" style="margin-top:26px"><a id="backLink" href="https://global.osmaigc.com" style="letter-spacing:.14em"></a></p>
+</div>
+<script>
+var API = location.origin + '/pc-submit';
+var tok = localStorage.getItem('pwc_token') || '';
+var reg = false, me = null, adminMode = false, showAll = false, cache = {};
+var $ = function(id){ return document.getElementById(id); };
+var I18N = {
+zh:{tag:'散场的故事，<b>在这里重逢</b>',login:'登录',register:'注册',email:'邮箱',pw:'密码（至少 6 位）',goLogin:'进入影院',goReg:'注册新世界账号',out:'退出登录',
+cap:'居民档案 · RESIDENT FILE',waking:'正在唤醒档案…',notSync:'你的居民档案还没上传——<br>桌面端「平行世界电影院」下次在线登录时自动同步',
+passBal:'通行证余额',films:'已藏影片',best:'街区最佳',stay:'驻留时长',uMin:' 分钟',uHr:' 小时',sync:'档案同步于 ',
+mine:'我的投稿',all:'全部投稿 · 管理',back:'← 返回官网',loading:'加载中…',fail:'失败了，稍后再试',saved:'已保存',work:'作品↗',
+replyPh:'给投稿人的回复（用户可见）',save:'保存',contact:'联系：',official:'官方：',anon:'匿名投稿',user:'用户#',admin:'管理员',
+noMine:'还没有投稿',noAll:'还没有任何投稿',toCreators:'去创作者专区交一份',adminOnly:'仅管理员可见',
+st_received:'已收到',st_reviewing:'审核中',st_scheduled:'已排片',st_rejected:'退回',typeFilm:'放映',typeGame:'街区',
+errBoth:'请填写邮箱和密码',errPw:'密码至少 6 位',errReg:'该邮箱已注册，直接登录即可',errCred:'邮箱或密码不对',errAuth:'请先登录'},
+en:{tag:'Stories that ended <b>meet you again here</b>',login:'Log in',register:'Sign up',email:'Email',pw:'Password (min 6)',goLogin:'Enter the cinema',goReg:'Create account',out:'Sign out',
+cap:'RESIDENT FILE',waking:'Waking your file…',notSync:'Your resident file hasn’t been uploaded —<br>the desktop app syncs it on its next online login',
+passBal:'Pass balance',films:'Films owned',best:'Best run',stay:'Time resident',uMin:' min',uHr:' h',sync:'File synced at ',
+mine:'My submissions',all:'All · Admin',back:'← Home',loading:'Loading…',fail:'Something failed — try again',saved:'Saved',work:'Work ↗',
+replyPh:'Reply to this creator (visible to them)',save:'Save',contact:'Contact: ',official:'Official: ',anon:'Anonymous',user:'User #',admin:'Admin',
+noMine:'No submissions yet',noAll:'No submissions yet',toCreators:'Send one from Creators',adminOnly:'Admin only',
+st_received:'Received',st_reviewing:'Reviewing',st_scheduled:'Scheduled',st_rejected:'Rejected',typeFilm:'Film',typeGame:'District',
+errBoth:'Email and password required',errPw:'Password needs 6+ characters',errReg:'Already registered — just sign in',errCred:'Wrong email or password',errAuth:'Please sign in first'},
+ja:{tag:'終わった物語が、<b>ここで再会する</b>',login:'ログイン',register:'新規登録',email:'メール',pw:'パスワード（6文字以上）',goLogin:'映画館へ',goReg:'アカウント作成',out:'ログアウト',
+cap:'レジデント・ファイル',waking:'ファイルを起動中…',notSync:'レジデントファイルは未同期です——<br>デスクトップ版が次回オンライン起動時に自動同期します',
+passBal:'パス残高',films:'所蔵作品',best:'ベスト記録',stay:'滞在時間',uMin:' 分',uHr:' 時間',sync:'同期時刻：',
+mine:'マイ投稿',all:'全投稿 · 管理',back:'← ホームへ',loading:'読み込み中…',fail:'失敗しました。後でもう一度',saved:'保存しました',work:'作品↗',
+replyPh:'投稿者への返信（本人に表示されます）',save:'保存',contact:'連絡先：',official:'公式：',anon:'匿名投稿',user:'ユーザー#',admin:'管理者',
+noMine:'まだ投稿がありません',noAll:'まだ投稿がありません',toCreators:'クリエイター专区から',adminOnly:'管理者のみ表示可',
+st_received:'受付',st_reviewing:'審査中',st_scheduled:'上映決定',st_rejected:'差し戻し',typeFilm:'上映',typeGame:'街区',
+errBoth:'メールとパスワードを入力してください',errPw:'パスワードは6文字以上',errReg:'登録済みです——ログインしてください',errCred:'メールまたはパスワードが違います',errAuth:'先にログインしてください'},
+ko:{tag:'끝난 이야기들이,<b>여기서 다시 만납니다</b>',login:'로그인',register:'회원가입',email:'이메일',pw:'비밀번호 (6자 이상)',goLogin:'극장 입장',goReg:'계정 만들기',out:'로그아웃',
+cap:'레지던트 파일',waking:'파일 깨우는 중…',notSync:'레지던트 파일이 아직 전송되지 않았습니다——<br>데스크톱 앱이 다음 온라인 실행 시 자동 동기화',
+passBal:'패스 잔액',films:'소장 작품',best:'최고 기록',stay:'체류 시간',uMin:'분',uHr:'시간',sync:'동기화 시각 ',
+mine:'내 투고',all:'전체 · 관리',back:'← 홈으로',loading:'불러오는 중…',fail:'실패했습니다. 잠시 후 다시',saved:'저장됨',work:'작품↗',
+replyPh:'작성자에게 답글 (작성자에게도 표시됩니다)',save:'저장',contact:'연락처: ',official:'측으로부터: ',anon:'익명 투고',user:'사용자#',admin:'관리자',
+noMine:'아직 투고가 없습니다',noAll:'아직 투고가 없습니다',toCreators:'크리에이터 코너에서 투고하기',adminOnly:'관리자만 표시',
+st_received:'접수',st_reviewing:'심사 중',st_scheduled:'상영 확정',st_rejected:'반송',typeFilm:'상영',typeGame:'지구',
+errBoth:'이메일과 비밀번호를 입력하세요',errPw:'비밀번호는 6자 이상',errReg:'이미 가입됨——로그인하세요',errCred:'이메일 또는 비밀번호가 잘못되었습니다',errAuth:'먼저 로그인하세요'}
+};
+var LANG = (function(){
+  var m = document.cookie.match(/(?:^|; )pc_lang=([a-zA-Z]+)/);
+  var l = String(m ? m[1] : (localStorage.getItem('pc_lang') || (navigator.language || 'zh'))).slice(0, 2).toLowerCase();
+  return ['zh','en','ja','ko'].indexOf(l) >= 0 ? l : 'zh';
+})();
+function t(k){ return (I18N[LANG] || I18N.zh)[k] || I18N.zh[k] || k; }
+function setLang(l){ LANG = l; localStorage.setItem('pc_lang', l); document.cookie = 'pc_lang=' + l + '; path=/; domain=.osmaigc.com; max-age=31536000'; applyLang(); }
+function applyLang(){
+  document.documentElement.lang = LANG === 'zh' ? 'zh-CN' : LANG;
+  $('tagline').innerHTML = t('tag'); $('t-in').textContent = t('login'); $('t-up').textContent = t('register');
+  $('email').placeholder = t('email'); $('pw').placeholder = t('pw');
+  $('goBtn').textContent = reg ? t('goReg') : t('goLogin');
+  $('outBtn').textContent = t('out'); $('rcap').textContent = t('cap');
+  $('mt-mine').textContent = t('mine'); $('mt-all').textContent = t('all'); $('backLink').textContent = t('back');
+  var bs = $('langs').children; for (var i = 0; i < bs.length; i++) bs[i].className = bs[i].getAttribute('data-l') === LANG ? 'on' : '';
+  if (me) { $('who').textContent = me.email + (adminMode ? ' · ' + t('admin') : ''); resident(); render(true); }
+}
+$('langs').onclick = function(e){ var l = e.target.getAttribute && e.target.getAttribute('data-l'); if (l) setLang(l); };
+$('t-in').onclick = function(){ tab(1); };
+$('t-up').onclick = function(){ tab(0); };
+function tab(isLogin){ reg = !isLogin; $('t-in').className = isLogin ? 'on' : ''; $('t-up').className = isLogin ? '' : 'on'; $('goBtn').textContent = isLogin ? t('goLogin') : t('goReg'); $('pw').autocomplete = isLogin ? 'current-password' : 'new-password'; }
+$('mt-mine').onclick = function(){ mineTab(0); };
+$('mt-all').onclick = function(){ mineTab(1); };
+function mineTab(a){ showAll = !!a; $('mt-all').className = a ? 'on' : ''; $('mt-mine').className = a ? '' : 'on'; cache = {}; render(true); }
+async function api(p, body, method){
+  var r = await fetch(API + p, { method: method || (body ? 'POST' : 'GET'), credentials: 'include', headers: { 'content-type': 'application/json', ...(tok ? { authorization: 'Bearer ' + tok } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  return r.json().then(function(j){ return { code: r.status, j: j }; });
+}
+function errText(e){
+  e = String(e || '');
+  var exact = { 'email and password required': t('errBoth'), 'password too short (min 6)': t('errPw'), 'email already registered': t('errReg'), 'invalid email or password': t('errCred'), 'not authenticated': t('errAuth'), 'admin only': t('adminOnly') };
+  if (exact[e]) return exact[e];
+  if (/too short/i.test(e)) return t('errPw');
+  return t('fail');
+}
+async function go(){
+  var email = $('email').value.trim(), password = $('pw').value;
+  var m = $('msg'); m.textContent = '';
+  $('goBtn').disabled = true;
+  var res = await api('/api/auth/' + (reg ? 'register' : 'login'), { email: email, password: password });
+  $('goBtn').disabled = false;
+  if (res.code === 200 && res.j.token){ tok = res.j.token; localStorage.setItem('pwc_token', tok); boot(); }
+  else m.textContent = errText(res.j.error);
+}
+$('goBtn').onclick = go;
+$('pw').addEventListener('keydown', function(e){ if (e.key === 'Enter') go(); });
+$('outBtn').onclick = async function(){ await api('/api/auth/logout', {}, 'POST'); document.cookie = 'pwc_token=; Max-Age=0; path=/; domain=.osmaigc.com'; localStorage.removeItem('pwc_token'); tok = ''; me = null; cache = {}; location.reload(); };
+function stBadge(s){ var c = { received: '#d4af6a', reviewing: '#9ef0e7', scheduled: '#8ee28e', rejected: '#ff9d8a' }[s] || '#d4af6a'; return '<span class="badge" style="background:' + c + '">' + t('st_' + (s || 'received')) + '</span>'; }
+function stOptions(s){ return ['received','reviewing','scheduled','rejected'].map(function(k){ return '<option value="' + k + '" ' + (k === s ? 'selected' : '') + '>' + t('st_' + k) + '</option>'; }).join(''); }
+function card(r){
+  var mine = !showAll || !me || !me.isAdmin;
+  var ops = mine ? '' :
+    '<div class="ops"><select id="st-' + r.id + '">' + stOptions(r.status) + '</select>' +
+    '<input id="rp-' + r.id + '" placeholder="' + esc(t('replyPh')) + '" value="' + esc(r.reply || '') + '">' +
+    '<button data-save="' + r.id + '">' + t('save') + '</button><span id="sv-' + r.id + '" style="font-size:12px;color:#8ee28e"></span></div>';
+  return '<div class="card"><div class="meta">#' + r.id + ' · ' + esc(r.at) + ' · ' + t(r.type === 'game' ? 'typeGame' : 'typeFilm') + ' ' + stBadge(r.status) +
+    (mine ? '' : ' · ' + (r.user_id ? t('user') + r.user_id : t('anon'))) + '</div>' +
+    '<div style="color:#e8c987;margin-top:2px">' + esc(r.name) + ' · <a href="' + esc(r.link) + '" target="_blank">' + t('work') + '</a></div>' +
+    (r.desc ? '<div style="color:#cfc6ae;font-size:14px;margin-top:4px">' + esc(r.desc) + '</div>' : '') +
+    (r.contact ? '<div class="meta" style="margin-top:5px">' + t('contact') + esc(r.contact) + '</div>' : '') +
+    (r.reply ? '<div class="reply">' + t('official') + esc(r.reply) + '</div>' : '') + ops + '</div>';
+}
+document.addEventListener('click', function(e){ var b = e.target.closest && e.target.closest('[data-save]'); if (!b) return;
+  var id = b.getAttribute('data-save');
+  api('/api/submissions/set', { id: id, status: $('st-' + id).value, reply: $('rp-' + id).value }).then(function(res){
+    $('sv-' + id).textContent = res.j.ok ? t('saved') : t('fail');
+    if (res.j.ok) setTimeout(function(){ $('sv-' + id).textContent = ''; }, 2000);
+  });
+});
+async function render(force){
+  var key = showAll ? 'all' : 'mine';
+  if (cache[key] && !force) return paint(cache[key]);
+  $('plist').innerHTML = '<p class="empty skel">' + t('loading') + '</p>';
+  var rows = await api(showAll ? '/api/submissions/all' : '/api/submissions/mine');
+  if (rows.code !== 200) { $('plist').innerHTML = '<p class="empty">' + errText(rows.j.error) + '</p>'; return; }
+  cache[key] = rows.j.submissions; paint(cache[key]);
+}
+function paint(list){
+  $('plist').innerHTML = (list || []).map(card).join('') || '<p class="empty">' + (showAll ? t('noAll') : t('noMine') + ' — <a href="https://global.osmaigc.com/creators.html#submitform">' + t('toCreators') + '</a>') + '</p>';
+}
+async function resident(){
+  var grid = $('rgrid'); grid.innerHTML = '<span class="r-wait">' + t('waking') + '</span>';
+  var g = await api('/api/game-profile');
+  if (g.code !== 200) { grid.innerHTML = '<span class="r-wait">' + errText(g.j.error) + '</span>'; return; }
+  var d = g.j;
+  if (d.pending) { grid.innerHTML = '<span class="r-wait">' + t('notSync') + '</span>'; return; }
+  var mins = d.playtime_min || 0;
+  var play = mins >= 60 ? (mins / 60).toFixed(1) + t('uHr') : mins + t('uMin');
+  var cells = [[d.pass_balance, t('passBal')], [d.films_owned, t('films')], [d.games_best, t('best')], [play, t('stay')]];
+  grid.innerHTML = cells.map(function(c){ return '<div class="r-cell"><span class="r-num">' + c[0] + '</span><span class="r-lab">' + c[1] + '</span></div>'; }).join('')
+    + '<div class="r-foot">' + t('sync') + esc(d.synced_at || '') + '</div>';
+}
+async function boot(){
+  if (!tok) return;
+  var m = await api('/api/user');
+  if (m.code !== 200) { localStorage.removeItem('pwc_token'); tok = ''; return; }
+  me = m.j; adminMode = !!me.isAdmin;
+  $('auth').hidden = true; $('mine').hidden = false;
+  $('who').textContent = me.email + (adminMode ? ' · ' + t('admin') : '');
+  $('mineTabs').hidden = !adminMode;
+  render();
+  resident();
+}
+function esc(s){ return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+applyLang();
+boot();
+</script></body></html>
