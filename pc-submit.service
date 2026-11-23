@@ -1,0 +1,14 @@
+[Unit]
+Description=Parallel World Cinema submission intake
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/submit
+EnvironmentFile=/opt/submit/.env
+ExecStart=/usr/bin/node /opt/submit/server.mjs
+Restart=always
+RestartSec=5
+SyslogIdentifier=pc-submit
+
+[Install]
+WantedBy=multi-user.target

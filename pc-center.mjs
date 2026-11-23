@@ -131,6 +131,10 @@ input,select,textarea{display:block;width:100%;box-sizing:border-box;margin:12px
 .meta{font-size:12px;color:#8b8272}
 .reply{margin-top:8px;border-left:2px solid #d4af6a;padding-left:10px;color:#cfc6ae;font-size:14px}
 .hdr{display:flex;justify-content:space-between;align-items:center}.hdr .em{color:#8b8272;font-size:13px}
+.ops{margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.ops input{display:inline-block;width:auto;flex:1;min-width:160px;margin:0;padding:8px 12px;font-size:13px}
+.ops select{width:auto;display:inline-block;padding:8px 12px;font-size:13px;background:rgba(255,255,255,.04);border:1px solid rgba(212,175,106,.35);border-radius:10px;color:#f4f0e6;font:inherit}
+.ops button{background:#d4af6a;color:#0d0b08;border:0;border-radius:99px;padding:8px 20px;font-size:13px;cursor:pointer}
 a{color:#d4af6a}
 </style></head><body>
 <div class="hdr"><h1>我的平行世界</h1><span class="em" id="who"></span></div>
@@ -139,12 +143,17 @@ a{color:#d4af6a}
 <input id="email" type="email" placeholder="邮箱"><input id="pw" type="password" placeholder="密码（至少 6 位）">
 <button class="go" id="goBtn">进入影院</button><div class="msg" id="msg"></div>
 </div>
-<div id="mine" hidden><div id="plist"></div><button class="go" onclick="logout()">退出登录</button></div>
+<div id="mine" hidden>
+<div class="tabs" id="mineTabs" hidden><button id="mt-mine" class="on" onclick="mineTab(0)">我的投稿</button><button id="mt-all" onclick="mineTab(1)">全部投稿 · 管理</button></div>
+<div id="plist"></div>
+<button class="go" onclick="logout()">退出登录</button></div>
 <script>
 var API = location.origin + '/pc-submit';
 var tok = localStorage.getItem('pwc_token') || '';
-var reg = false;
+var reg = false, me = null, adminMode = false, showAll = false;
 function tab(r){ reg = !!r; document.getElementById('t-up').className = r ? 'on' : ''; document.getElementById('t-in').className = r ? '' : 'on'; document.getElementById('goBtn').textContent = r ? '注册新世界账号' : '进入影院'; }
+function mineTab(a){ showAll = !!a; document.getElementById('mt-all').className = a ? 'on' : ''; document.getElementById('mt-mine').className = a ? '' : 'on'; render(); }
+window.mineTab = mineTab;
 async function api(p, body, method){
   var r = await fetch(API + p, { method: method || (body ? 'POST' : 'GET'), credentials: 'include', headers: { 'content-type': 'application/json', ...(tok ? { authorization: 'Bearer ' + tok } : {}) }, body: body ? JSON.stringify(body) : undefined });
   return r.json().then(function(j){ return { code: r.status, j: j }; });
@@ -160,18 +169,42 @@ document.getElementById('goBtn').onclick = go;
 document.getElementById('pw').addEventListener('keydown', function(e){ if (e.key === 'Enter') go(); });
 async function logout(){ await api('/api/auth/logout', {}, 'POST'); localStorage.removeItem('pwc_token'); tok = ''; boot(); }
 function stBadge(s){ var map = { received: ['已收到', '#d4af6a'], reviewing: ['审核中', '#9ef0e7'], scheduled: ['已排片', '#8ee28e'], rejected: ['退回', '#ff9d8a'] }; var v = map[s] || map.received; return '<span class="badge" style="background:' + v[1] + '">' + v[0] + '</span>'; }
+function stOptions(s){ var map = { received: '已收到', reviewing: '审核中', scheduled: '已排片', rejected: '退回' }; return Object.entries(map).map(function(e){ return '<option value="' + e[0] + '" ' + (e[0] === s ? 'selected' : '') + '>' + e[1] + '</option>'; }).join(''); }
+function card(r){
+  var mine = !showAll || !me || !me.isAdmin;
+  var ops = mine ? '' :
+    '<div class="ops"><select id="st-' + r.id + '">' + stOptions(r.status) + '</select>' +
+    '<input id="rp-' + r.id + '" placeholder="给投稿人的回复（用户可见）" value="' + esc(r.reply || '') + '" style="flex:1;min-width:160px;margin:0">' +
+    '<button onclick="save(' + r.id + ')">保存</button><span id="sv-' + r.id + '" style="font-size:12px;color:#8ee28e"></span></div>';
+  return '<div class="card"><div class="meta">#' + r.id + ' · ' + esc(r.at) + ' · ' + (r.type === 'game' ? '街区' : '放映') + ' ' + stBadge(r.status) +
+    (mine ? '' : ' · ' + (r.user_id ? '用户#' + r.user_id : '匿名投稿')) + '</div>' +
+    '<div style="color:#e8c987">' + esc(r.name) + ' · <a href="' + esc(r.link) + '" target="_blank">作品↗</a></div>' +
+    (r.desc ? '<div style="color:#cfc6ae;font-size:14px;margin-top:4px">' + esc(r.desc) + '</div>' : '') +
+    (r.contact ? '<div class="meta" style="margin-top:4px">联系：' + esc(r.contact) + '</div>' : '') +
+    (r.reply ? '<div class="reply">官方：' + esc(r.reply) + '</div>' : '') + ops + '</div>';
+}
+async function save(id){
+  var res = await api('/api/submissions/set', { id: id, status: document.getElementById('st-' + id).value, reply: document.getElementById('rp-' + id).value });
+  document.getElementById('sv-' + id).textContent = res.j.ok ? '已保存' : '失败';
+  if (res.j.ok) setTimeout(function(){ document.getElementById('sv-' + id).textContent = ''; }, 2000);
+}
+window.save = save;
+async function render(){
+  var rows = await api(showAll ? '/api/submissions/all' : '/api/submissions/mine');
+  if (rows.code !== 200) { document.getElementById('plist').innerHTML = '<p class="meta" style="text-align:center">' + (rows.j.error || '加载失败') + '</p>'; return; }
+  document.getElementById('plist').innerHTML = (rows.j.submissions || []).map(card).join('') || '<p class="meta" style="text-align:center;padding:40px 0">' + (showAll ? '还没有任何投稿' : '还没有投稿 — 去 <a href="https://global.osmaigc.com/creators.html#submitform">创作者专区</a> 交一份') + '</p>';
+}
 async function boot(){
   if (!tok) { document.getElementById('auth').hidden = false; document.getElementById('mine').hidden = true; return; }
-  var me = await api('/api/user');
-  if (me.code !== 200) { localStorage.removeItem('pwc_token'); tok = ''; return boot(); }
+  var m = await api('/api/user');
+  if (m.code !== 200) { localStorage.removeItem('pwc_token'); tok = ''; return boot(); }
+  me = m.j; adminMode = !!me.isAdmin;
   document.getElementById('auth').hidden = true; document.getElementById('mine').hidden = false;
-  document.getElementById('who').textContent = me.j.email;
-  var rows = await api('/api/submissions/mine');
-  document.getElementById('plist').innerHTML = (rows.j.submissions || []).map(function(r){
-    return '<div class="card"><div class="meta">#' + r.id + ' · ' + esc(r.at) + ' · ' + (r.type === 'game' ? '街区' : '放映') + ' ' + stBadge(r.status) + '</div><div style="color:#e8c987">' + esc(r.name) + ' · <a href="' + esc(r.link) + '" target="_blank">作品↗</a></div>' + (r.reply ? '<div class="reply">官方：' + esc(r.reply) + '</div>' : '') + '</div>';
-  }).join('') || '<p class="meta" style="text-align:center;padding:40px 0">还没有投稿 — 去 <a href="https://global.osmaigc.com/creators.html#submitform">创作者专区</a> 交一份</p>';
+  document.getElementById('who').textContent = me.email + (adminMode ? ' · 管理员' : '');
+  document.getElementById('mineTabs').hidden = !adminMode;
+  render();
 }
-function esc(s){ return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function esc(s){ return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 window.logout = logout;
 boot();
 </script></body></html>`;
@@ -198,7 +231,7 @@ http.createServer((req, res) => {
       if (!email || !password) return send(400, JSON.stringify({ error: "email and password required" }));
       if (password.length < 6) return send(400, JSON.stringify({ error: "password too short (min 6)" }));
       if (db.prepare("SELECT id FROM users WHERE LOWER(email) = ?").get(email)) return send(409, JSON.stringify({ error: "email already registered" }));
-      const info = db.prepare("INSERT INTO users (email, pass_hash) VALUES (?, ?)").run(email, hashPass(password));
+      const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin) VALUES (?, ?, ?)").run(email, hashPass(password), email === ADMIN_EMAIL ? 1 : 0);
       const token = crypto.randomBytes(32).toString("hex");
       db.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, info.lastInsertRowid);
       send(200, JSON.stringify({ token, user: pubUser({ id: info.lastInsertRowid, email, is_admin: email === ADMIN_EMAIL }) }), null, { "set-cookie": cookieFor(token) });
@@ -250,6 +283,20 @@ http.createServer((req, res) => {
   if (p === "/api/submissions/mine" && req.method === "GET") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
     return send(200, JSON.stringify({ submissions: db.prepare("SELECT * FROM submissions WHERE user_id = ? ORDER BY id DESC").all(user.id) }));
+  }
+  if (p === "/api/submissions/all" && req.method === "GET") {
+    if (!user || !user.is_admin) return send(403, JSON.stringify({ error: "admin only" }));
+    return send(200, JSON.stringify({ submissions: db.prepare("SELECT * FROM submissions ORDER BY id DESC").all() }));
+  }
+  if (p === "/api/submissions/set" && req.method === "POST") {
+    if (!user || !user.is_admin) return send(403, JSON.stringify({ error: "admin only" }));
+    return readBody().then(() => {
+      const id = Number(body.id);
+      const status = ST[body.status] ? body.status : "received";
+      const reply = String(body.reply || "").slice(0, 1000);
+      db.prepare("UPDATE submissions SET status = ?, reply = ? WHERE id = ?").run(status, reply, id);
+      send(200, JSON.stringify({ ok: true }));
+    });
   }
 
   // ---- portal page ----
