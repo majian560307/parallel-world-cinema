@@ -449,6 +449,7 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
     <a href="#pass">通行证</a>
     <a class="link" href="creators.html" style="margin-right:2px">创作者专区</a>
     <a class="link" href="http://www.osmaigc.com/" target="_blank" rel="noopener" style="margin-right:2px">元宇宙主站 ↗</a>
+    <a class="link" id="acct" href="https://app.osmaigc.com/pc-submit/account">我的账号</a>
     <a class="cta" href="#download">预约</a>
   </nav>
 </header>
@@ -866,5 +867,18 @@ document.querySelectorAll('.rise').forEach((el,i)=>{
 <script src="i18n_ja.json.js"></script>
 <script src="i18n_ko.json.js"></script>
 <script src="i18n.js"></script>
+<script>
+// nav login state: if a portal session exists, show who is in
+(function(){
+  var tok = localStorage.getItem('pwc_token') || '';
+  fetch('https://app.osmaigc.com/pc-submit/api/user', { credentials: 'include', headers: tok ? { authorization: 'Bearer ' + tok } : {} })
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(u){ if (!u || !u.email) return;
+      var a = document.getElementById('acct'); if (!a) return;
+      a.textContent = u.email.split('@')[0] + ' ✓';
+      if (u.isAdmin) a.textContent += ' ⚙';
+    }).catch(function(){});
+})();
+</script>
 </body>
 </html>
