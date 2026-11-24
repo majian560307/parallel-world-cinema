@@ -85,6 +85,24 @@ const call = async (p, opt = {}) => {
   const goldB = db.prepare("SELECT unit_cash, qty FROM pass_batches WHERE user_id=? AND source IN ('game','promo_bonus') ORDER BY unit_cash").all(u1);
   ok(goldB.length === 2 && goldB[0].unit_cash === 0 && goldB[1].unit_cash === 1, `金通分两批(赠0/真钱1) → ${JSON.stringify(goldB)}`);
 
+  // 7b) 充值流水 ref 幂等：重放同一笔不再发币
+  const ref1 = "smoke-ref-dup";
+  const rFirst = await call("/api/passes/recharge", { method: "POST", cookie: cA, body: { pack: "small", kind: "gold", ref: ref1 } });
+  const rDup = await call("/api/passes/recharge", { method: "POST", cookie: cA, body: { pack: "small", kind: "gold", ref: ref1 } });
+  ok(rFirst.status === 200 && rDup.status === 409 && rDup.j.error === "duplicate_ref",
+     `同 ref 重放被拒 → ${rFirst.status}/${rDup.status} ${rDup.j.error}`);
+  const balZ = await call("/api/passes", { cookie: cA });
+  ok(balZ.status === 200 && balZ.j.gold === rFirst.j.gold, `重放不重复发币 → ${balZ.j.gold} vs ${rFirst.j.gold}`);
+
+  // 7c) 普通用户不能自己充值（金通必须自付费订单产生）
+  const rNa = await call("/api/passes/recharge", { method: "POST", cookie: cB, body: { pack: "large", kind: "gold" } });
+  ok(rNa.status === 402, `非管理员充值被拒 → ${rNa.status}`);
+
+  // 7d) 每一笔赠送金通都必须挂着一条充值流水
+  const nLog = db.prepare("SELECT COUNT(*) c FROM recharge_log").get().c;
+  const nBonus = db.prepare("SELECT COUNT(*) c FROM pass_batches WHERE kind='gold' AND unit_cash=0 AND source IN ('compute_bonus','promo_bonus')").get().c;
+  ok(nLog > 0 && nLog === nBonus, `促销金通全有充值凭证 → log=${nLog} bonus=${nBonus}`);
+
   // 8) 算力端点
   r = await call("/api/compute", { cookie: cA });
   ok(r.status === 200 && r.j.compute === 20 && r.j.ledger.length >= 1, `算力账本 → ${r.j.compute}`);

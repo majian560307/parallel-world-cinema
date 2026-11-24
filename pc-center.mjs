@@ -164,6 +164,18 @@ db.exec(`CREATE TABLE IF NOT EXISTS pass_spends (
   at TEXT DEFAULT (datetime('now'))
 )`);
 // 通证批次账本：判据不是币种,是「这张票背后有没有真钱」→ unit_cash
+db.exec(`CREATE TABLE IF NOT EXISTS recharge_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ref TEXT UNIQUE,
+  admin_id INTEGER,
+  target_uid INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  pack TEXT,
+  amount INTEGER DEFAULT 0,
+  compute INTEGER DEFAULT 0,
+  bonus INTEGER DEFAULT 0,
+  at TEXT
+)`);
 db.exec(`CREATE TABLE IF NOT EXISTS pass_batches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -172,11 +184,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS pass_batches (
   remaining INTEGER NOT NULL,
   unit_cash REAL NOT NULL DEFAULT 0,
   source TEXT DEFAULT '',
+  ref TEXT,
   reason TEXT DEFAULT '',
   expires_at TEXT,
   at TEXT DEFAULT (datetime('now'))
 )`);
 db.exec("CREATE INDEX IF NOT EXISTS idx_batch_uid ON pass_batches (user_id, remaining, expires_at)");
+try { db.exec("ALTER TABLE pass_batches ADD COLUMN ref TEXT"); } catch {}
 ensureCol("pass_spends", "spend_json", "TEXT DEFAULT ''");
 db.exec(`CREATE TABLE IF NOT EXISTS compute_credits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,14 +283,32 @@ function syncPassTotals(uid) {
   db.prepare("UPDATE users SET passes = ?, passes_green = ?, passes_gold = ? WHERE id = ?").run(b.total, b.green, b.gold, uid);
   return b;
 }
+// 金通来源闸：金通只能由「有人付过钱」的动作产生。
+// 现金金通(unit_cash>0) 只认 真钱充值/票房分成/退回/历史迁移；
+// 促销赠送金通(unit_cash=0) 必须挂在一笔真实充值流水上（recharge_log.ref），否则一律不落账。
+const GOLD_CASH_SRC = new Set(["game", "payout", "refund", "legacy"]);
+const GOLD_PROMO_SRC = new Set(["compute_bonus", "promo_bonus"]);
 function creditPasses(uid, qty, opt = {}) {
   const n = Math.round(Number(qty) || 0);
   if (!(n > 0)) return passBalances(uid);
   const kind = opt.kind === "green" ? "green" : "gold";
   const unitCash = Math.max(0, Number(opt.unitCash) || 0);
+  const src = String(opt.source || "");
+  const ref = String(opt.ref || "").slice(0, 64);
+  if (kind === "gold" && unitCash > 0 && !GOLD_CASH_SRC.has(src)) {
+    console.warn(`[guard] 拒绝无付款来源的现金金通: user=${uid} src=${src} qty=${n}`);
+    return passBalances(uid);
+  }
+  if (kind === "gold" && GOLD_PROMO_SRC.has(src)) {
+    const okRef = ref && db.prepare("SELECT 1 FROM recharge_log WHERE ref = ?").get(ref);
+    if (!okRef) {
+      console.warn(`[guard] 拒绝无充值凭证的赠送金通: user=${uid} src=${src} ref=${ref || "-"} qty=${n}`);
+      return passBalances(uid);
+    }
+  }
   const exp = Number(opt.days) > 0 ? bjDate(Number(opt.days)) : null;
-  db.prepare(`INSERT INTO pass_batches (user_id, kind, qty, remaining, unit_cash, source, reason, expires_at, at)
-    VALUES (?,?,?,?,?,?,?,?,?)`).run(uid, kind, n, n, unitCash, String(opt.source || ""), String(opt.reason || "").slice(0, 80), exp, nowStr());
+  db.prepare(`INSERT INTO pass_batches (user_id, kind, qty, remaining, unit_cash, source, ref, reason, expires_at, at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uid, kind, n, n, unitCash, src, ref || null, String(opt.reason || "").slice(0, 80), exp, nowStr());
   db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)")
     .run(uid, n, `${PASS_WORD[kind]}+${n} · ${String(opt.reason || "入账").slice(0, 60)}`, nowStr());
   return syncPassTotals(uid);
@@ -619,6 +651,8 @@ function obsData() {
     green: one("SELECT COALESCE(SUM(remaining),0) c FROM pass_batches WHERE kind='green' AND (expires_at IS NULL OR expires_at >= date('now','+8 hours'))"),
     gold: one("SELECT COALESCE(SUM(remaining),0) c FROM pass_batches WHERE kind='gold'"),
     greenIssued: one("SELECT COALESCE(SUM(qty),0) c FROM pass_batches WHERE kind='green'"),
+    recharges: one("SELECT COUNT(*) c FROM recharge_log"),
+    goldCash: one("SELECT COALESCE(SUM(qty*unit_cash),0) c FROM pass_batches WHERE kind='gold'"),
     compute: one("SELECT COALESCE(SUM(COALESCE(compute_balance,0)),0) c FROM users"),
     cashBox: one("SELECT COALESCE(SUM(COALESCE(cash_backed,0)),0) c FROM show_tickets"),
   };
@@ -925,7 +959,7 @@ function paintObs(){
   var j = obsCache, s = j.stats || {};
   if (admSel === 'ov') {
     var cells = [['注册用户', s.users], ['此刻在线', s.online], ['今日登录', s.loginsToday], ['7 日活跃', s.active7], ['24h 失败登录', s.fails], ['投稿总数', s.subs],
-      ['绿通在库', s.green], ['金通在库', s.gold], ['绿通累计发行', s.greenIssued], ['算力负债', s.compute], ['现金背书票房', s.cashBox]];
+      ['绿通在库', s.green], ['金通在库', s.gold], ['绿通累计发行', s.greenIssued], ['充值流水', s.recharges], ['真钱金通', s.goldCash], ['算力负债', s.compute], ['现金背书票房', s.cashBox]];
     box.innerHTML = '<div class="ostat">' + cells.map(function(c){ return '<div><b>' + (c[1] == null ? '—' : c[1]) + '</b><span>' + c[0] + '</span></div>'; }).join('') + '</div>'
       + '<p class="meta" style="text-align:center;margin:2px 0 0">数据实时取自服务器 · ' + esc(new Date().toLocaleString('zh-CN')) + '</p>';
   } else if (admSel === 'us') {
@@ -1224,26 +1258,33 @@ http.createServer((req, res) => {
       if (!pack) return send(400, JSON.stringify({ error: "unknown pack", packs: Object.keys(PASS_PACKS) }));
       if (kind === "green") return send(403, JSON.stringify({ error: "green_signup_only", hint: "绿通只作为首注礼发放，不通过充值发行；请使用 kind=gold 或 kind=compute" }));
       if (!promoActive() && kind === "compute") return send(403, JSON.stringify({ error: "promo_over", hint: "促销期已结束，充算力不再赠送金通" }));
-      let added = 0, bonus = 0, compute = 0;
+      let added = 0, bonus = 0, compute = 0, computeQty = 0;
       if (kind === "compute") {
-        const qty = Math.round(Number(body.compute || pack.n) || 0);
-        if (!(qty > 0)) return send(400, JSON.stringify({ error: "bad_compute_qty" }));
-        compute = creditCompute(user.id, qty, `充值算力 · ${pack.label}`, "matrix");
-        if (promoActive()) {
-          bonus = Math.round(qty * PROMO.computeGold);
-          if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "compute_bonus", reason: `促销 · 充算力送金通（${qty} 算力）` });
-        }
+        computeQty = Math.round(Number(body.compute || pack.n) || 0);
+        if (!(computeQty > 0)) return send(400, JSON.stringify({ error: "bad_compute_qty" }));
+        if (promoActive()) bonus = Math.round(computeQty * PROMO.computeGold);
       } else {
         added = pack.n;
-        creditPasses(user.id, added, { kind: "gold", unitCash: 1, source: "game", reason: `充值 · ${pack.label}` });
-        if (promoActive()) {
-          bonus = Math.round(added * PROMO.goldBonus);
-          if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "promo_bonus", reason: "促销 · 充金送金" });
-        }
+        if (promoActive()) bonus = Math.round(added * PROMO.goldBonus);
+      }
+      // 唯一充值流水：ref 幂等（同 ref 重复提交直接 409，防后台连点重复发币）
+      const ref = String(body.ref || "").slice(0, 64) || `rch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        db.prepare("INSERT INTO recharge_log (ref, admin_id, target_uid, kind, pack, amount, compute, bonus, at) VALUES (?,?,?,?,?,?,?,?,?)")
+          .run(ref, user.id, user.id, kind, String(pack.label || ""), added, computeQty, bonus || 0, nowStr());
+      } catch {
+        return send(409, JSON.stringify({ error: "duplicate_ref", ref, hint: "这笔充值已入账，换一个 ref 再提交" }));
+      }
+      if (kind === "compute") {
+        compute = creditCompute(user.id, computeQty, `充值算力 · ${pack.label}`, "matrix");
+        if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "compute_bonus", ref, reason: `促销 · 充算力送金通（${computeQty} 算力）` });
+      } else {
+        creditPasses(user.id, added, { kind: "gold", unitCash: 1, source: "game", ref, reason: `充值 · ${pack.label}` });
+        if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "promo_bonus", ref, reason: "促销 · 充金送金" });
       }
       const t = passBalances(user.id);
       send(200, JSON.stringify({ passes: t.total, green: t.green, gold: t.gold, added, kind,
-        bonus: bonus || 0, compute: compute || 0, promo: promoActive(), label: pack.label }));
+        bonus: bonus || 0, compute: compute || 0, promo: promoActive(), label: pack.label, ref }));
     });
   }
   // 游戏内消耗（观测/私语/按摩…）：带 key 幂等扣费；同 key 可退一次，杜绝客户端无限退款
