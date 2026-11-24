@@ -331,7 +331,7 @@ const PROMO = {
   on: String(process.env.PROMO_ON ?? "1") === "1",
   ends: process.env.PROMO_ENDS || "2027-03-31",
   greenDays: Number(process.env.PASS_GREEN_DAYS || 90),
-  greenCompute: Number(process.env.PROMO_GREEN_COMPUTE || 1),
+  computeGold: Number(process.env.PROMO_COMPUTE_GOLD || 1),
   goldBonus: Number(process.env.PROMO_GOLD_BONUS || 1),
 };
 const promoActive = () => PROMO.on && localDayStr() <= PROMO.ends;
@@ -536,7 +536,7 @@ function verifyMailHtml(email, link) {
 <div style="max-width:520px;margin:0 auto;background:#12151a;border:1px solid #2a2f36;border-radius:12px;padding:26px">
 <div style="font-size:12px;letter-spacing:3px;color:#8a7a55">PARALLEL WORLD CINEMA</div>
 <h2 style="color:#e8c987;font-weight:600;margin:10px 0 8px">确认你的邮箱</h2>
-<p style="color:#cfc6ae;line-height:1.7;font-size:14px">${email} 正在注册「平行世界电影院」。点下面的按钮完成确认，即可领取 ${SIGNUP_BONUS} 张通证。</p>
+<p style="color:#cfc6ae;line-height:1.7;font-size:14px">${email} 正在注册「平行世界电影院」。点下面的按钮完成确认，即可领取首注礼：${SIGNUP_BONUS} 张绿通（仅用于看片，不计票房，90 天有效）。</p>
 <p style="margin:22px 0"><a href="${link}" style="display:inline-block;background:#d4af6a;color:#0b0d10;text-decoration:none;padding:12px 26px;border-radius:8px;font-weight:600">确认邮箱并领取通证</a></p>
 <p style="color:#7d7460;font-size:12px;line-height:1.6">链接 ${VERIFY_TTL_H} 小时内有效，只能点一次。如果不是你本人操作，忽略这封邮件即可，账号不会生效任何资产。<br>如按钮无法点击，复制到浏览器打开：<br><span style="color:#9ef0e7;word-break:break-all">${link}</span></p>
 </div></div>`;
@@ -549,7 +549,7 @@ async function issueVerifyMail(uid, email, ip) {
   try {
     await sendMail({
       to: email,
-      subject: `确认邮箱 · 领取 ${SIGNUP_BONUS} 张通证｜平行世界电影院`,
+      subject: `确认邮箱 · 领取首注礼 ${SIGNUP_BONUS} 张绿通｜平行世界电影院`,
       html: verifyMailHtml(email, link),
       text: `确认你的邮箱：${link}\n链接 ${VERIFY_TTL_H} 小时内有效。`,
     });
@@ -563,10 +563,11 @@ async function issueVerifyMail(uid, email, ip) {
 }
 
 function grantVerifyBonus(uid) {
-  const done = db.prepare("SELECT 1 AS x FROM pass_ledger WHERE user_id = ? AND reason LIKE ?").get(uid, "%邮箱验证赠送%");
+  const done = db.prepare("SELECT 1 AS x FROM pass_ledger WHERE user_id = ? AND (reason LIKE ? OR reason LIKE ? OR reason LIKE ?)")
+    .get(uid, "%首注礼%", "%邮箱验证赠送%", "%注册赠送%");
   if (done) return { granted: 0 };
   // 礼包发金通但 unit_cash=0：能看片、不产生票房分成 → 刷号套利收益归零
-  creditPasses(uid, SIGNUP_BONUS, { kind: "gold", unitCash: 0, source: "signup", reason: "邮箱验证赠送" });
+  creditPasses(uid, SIGNUP_BONUS, { kind: "green", unitCash: 0, source: "signup", reason: "首注礼 · 仅看片", days: PROMO.greenDays });
   return { granted: SIGNUP_BONUS };
 }
 
@@ -1066,7 +1067,7 @@ http.createServer((req, res) => {
       const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin, passes, email_verified, signup_ip) VALUES (?, ?, ?, ?, ?, ?)")
         .run(email, hashPass(password), isAdmin, bonusNow, REQUIRE_VERIFY ? 0 : 1, ip);
       const uid = Number(info.lastInsertRowid);
-      if (bonusNow) creditPasses(uid, bonusNow, { kind: "gold", unitCash: 0, source: "signup", reason: "注册赠送" });
+      if (bonusNow) creditPasses(uid, bonusNow, { kind: "green", unitCash: 0, source: "signup", reason: "首注礼 · 仅看片", days: PROMO.greenDays });
       const token = crypto.randomBytes(32).toString("hex");
       db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, uid, ip, clientUa(req.headers));
       db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, uid);
@@ -1196,32 +1197,42 @@ http.createServer((req, res) => {
   }
   if (p === "/api/promo" && req.method === "GET") {
     return send(200, JSON.stringify({ promo: promoActive(), ends: PROMO.ends,
-      green_days: PROMO.greenDays, green_compute_rate: PROMO.greenCompute, gold_bonus_rate: PROMO.goldBonus,
-      note: "促销期：Matrix 线充绿通送算力；游戏线充金通送金通。绿通不计票房，促销结束停发。" }));
+      green_days: PROMO.greenDays, green_scope: "signup_only",
+      compute_gold_rate: PROMO.computeGold, gold_bonus_rate: PROMO.goldBonus,
+      note: "绿通=首注礼（仅看片、不计票房、90 天有效）；促销期：Matrix 线充算力送金通，游戏线充金通送金通；促销结束两样都不送。" }));
   }
   if (p === "/api/passes/recharge" && req.method === "POST") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
     return readBody().then(() => {
-      const pack = PASS_PACKS[body.pack];
-      if (!pack) return send(400, JSON.stringify({ error: "unknown pack", packs: Object.keys(PASS_PACKS) }));
       // 支付通道未接：加卡只允许管理员（旧本地版免费充值是权限漏洞，已封）
       if (!user.is_admin && !adminCookieOk(req.headers)) return send(402, JSON.stringify({ error: "payment_required", packs: Object.keys(PASS_PACKS) }));
-      // kind=green 走 Matrix 线（创作者侧，计 90 天有效期、永不计票房）；kind=gold 走游戏线（玩家侧）
-      const kind = body.kind === "green" ? "green" : "gold";
-      if (kind === "green" && !promoActive()) return send(403, JSON.stringify({ error: "green_retired", hint: "促销期已结束，绿通停止发行；请使用金通" }));
-      creditPasses(user.id, pack.n, { kind, unitCash: kind === "green" ? 0 : 1,
-        source: kind === "green" ? "matrix" : "game", reason: `充值 · ${pack.label}`,
-        days: kind === "green" ? PROMO.greenDays : 0 });
-      let bonus = 0, compute = 0;
-      if (promoActive()) {
-        if (kind === "green") { compute = creditCompute(user.id, Math.round(pack.n * PROMO.greenCompute), "促销 · 充绿通送算力", "promo"); }
-        else {
-          bonus = Math.round(pack.n * PROMO.goldBonus);
+      // 绿通只做首注礼，不通过充值发行。
+      // kind=gold    → 游戏线真钱充值（unit_cash=1，计入票房），促销期充金送金（赠送批次 0 现金）
+      // kind=compute → Matrix 线充算力：只加算力，促销期按比例送金通（0 现金），不动现金通证
+      const kind = body.kind === "green" ? "green" : (body.kind === "compute" ? "compute" : "gold");
+      const pack = PASS_PACKS[body.pack] || (kind === "compute" ? { n: 0, label: `算力 ${Math.round(Number(body.compute) || 0)}` } : null);
+      if (!pack) return send(400, JSON.stringify({ error: "unknown pack", packs: Object.keys(PASS_PACKS) }));
+      if (kind === "green") return send(403, JSON.stringify({ error: "green_signup_only", hint: "绿通只作为首注礼发放，不通过充值发行；请使用 kind=gold 或 kind=compute" }));
+      if (!promoActive() && kind === "compute") return send(403, JSON.stringify({ error: "promo_over", hint: "促销期已结束，充算力不再赠送金通" }));
+      let added = 0, bonus = 0, compute = 0;
+      if (kind === "compute") {
+        const qty = Math.round(Number(body.compute || pack.n) || 0);
+        if (!(qty > 0)) return send(400, JSON.stringify({ error: "bad_compute_qty" }));
+        compute = creditCompute(user.id, qty, `充值算力 · ${pack.label}`, "matrix");
+        if (promoActive()) {
+          bonus = Math.round(qty * PROMO.computeGold);
+          if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "compute_bonus", reason: `促销 · 充算力送金通（${qty} 算力）` });
+        }
+      } else {
+        added = pack.n;
+        creditPasses(user.id, added, { kind: "gold", unitCash: 1, source: "game", reason: `充值 · ${pack.label}` });
+        if (promoActive()) {
+          bonus = Math.round(added * PROMO.goldBonus);
           if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "promo_bonus", reason: "促销 · 充金送金" });
         }
       }
       const t = passBalances(user.id);
-      send(200, JSON.stringify({ passes: t.total, green: t.green, gold: t.gold, added: pack.n, kind,
+      send(200, JSON.stringify({ passes: t.total, green: t.green, gold: t.gold, added, kind,
         bonus: bonus || 0, compute: compute || 0, promo: promoActive(), label: pack.label }));
     });
   }
@@ -1509,7 +1520,7 @@ http.createServer((req, res) => {
   if (p === "/api/submissions" && req.method === "POST") {
     const ip = req.headers["x-forwarded-for"] || "unknown";
     // 投稿必须登录（前端有引导，这里是真正的闸门：匿名一律 401）
-    if (!user) return send(401, JSON.stringify({ ok: false, err: "login required", need_login: true, signup_bonus: SIGNUP_BONUS, signup: "/pc-submit/account#reg" }));
+    if (!user) return send(401, JSON.stringify({ ok: false, err: "login required", need_login: true, signup_bonus: SIGNUP_BONUS, signup_bonus_kind: "green", signup: "/pc-submit/account#reg" }));
     return readBody().then(() => {
       const rec = {
         at: new Date().toISOString().replace("T", " ").slice(0, 19),

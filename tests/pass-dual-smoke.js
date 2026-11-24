@@ -68,19 +68,26 @@ const call = async (p, opt = {}) => {
   const po = db.prepare("SELECT kind, qty, unit_cash, source FROM pass_batches WHERE user_id=? AND source='payout'").get(u1);
   ok(po && po.qty === 2 && po.unit_cash === 1, `分成入账金通真钱 → ${JSON.stringify(po)}`);
 
-  // 6) 促销：充绿通送算力
+  // 6) 绿通不再通过充值发行（只做首注礼）
   r = await call("/api/passes/recharge", { method: "POST", cookie: cA, body: { pack: "mid", kind: "green" } });
-  ok(r.status === 200 && r.j.green === 12 && r.j.compute === 12, `充绿通12送算力12 → ${JSON.stringify({ g: r.j.green, c: r.j.compute, k: r.j.kind })}`);
+  ok(r.status === 403 && r.j.error === "green_signup_only", `充绿通被拒 → ${r.status} ${r.j.error}`);
+
+  // 6b) 促销：充算力送金通（1 算力 = 1 金通，赠送批次 0 现金）
+  r = await call("/api/passes/recharge", { method: "POST", cookie: cA, body: { kind: "compute", compute: 20 } });
+
+  ok(r.status === 200 && r.j.compute === 20 && r.j.bonus === 20 && r.j.added === 0,
+     `充算力20送金通20、不动现金通证 → ${JSON.stringify({ c: r.j.compute, b: r.j.bonus, a: r.j.added })}`);
 
   // 7) 促销：充金送金（买的 1 现金背书、送的 0）
   r = await call("/api/passes/recharge", { method: "POST", cookie: cA, body: { pack: "small", kind: "gold" } });
-  ok(r.status === 200 && r.j.gold === 12 && r.j.bonus === 5, `充金5送金5(+分成2) → ${JSON.stringify({ o: r.j.gold, b: r.j.bonus })}`);
+  // 2(分成) + 20(充算力送) + 5(充) + 5(送) = 32
+  ok(r.status === 200 && r.j.gold === 32 && r.j.bonus === 5, `充金5送金5(+分成2+充算力送20) → ${JSON.stringify({ o: r.j.gold, b: r.j.bonus })}`);
   const goldB = db.prepare("SELECT unit_cash, qty FROM pass_batches WHERE user_id=? AND source IN ('game','promo_bonus') ORDER BY unit_cash").all(u1);
   ok(goldB.length === 2 && goldB[0].unit_cash === 0 && goldB[1].unit_cash === 1, `金通分两批(赠0/真钱1) → ${JSON.stringify(goldB)}`);
 
   // 8) 算力端点
   r = await call("/api/compute", { cookie: cA });
-  ok(r.status === 200 && r.j.compute === 12 && r.j.ledger.length >= 1, `算力账本 → ${r.j.compute}`);
+  ok(r.status === 200 && r.j.compute === 20 && r.j.ledger.length >= 1, `算力账本 → ${r.j.compute}`);
 
   // 9) 幂等
   r = await call("/api/stage/buy", { method: "POST", cookie: cB, body: { show_id: 1, key: "k1" } });
