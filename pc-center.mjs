@@ -502,6 +502,11 @@ const adminSig = () => crypto.createHmac("sha256", "pwc-admin-v1|" + ADMIN_PASS)
 const COOKIE_DOMAIN = (process.env.COOKIE_DOMAIN === "none") ? "" : `; Domain=${process.env.COOKIE_DOMAIN || ".osmaigc.com"}`;
 const COOKIE_SECURE = process.env.COOKIE_INSECURE === "1" ? "" : "; Secure";
 const ADMIN_COOKIE = () => `pcadmin=${adminSig()}; Path=/${COOKIE_DOMAIN}; Max-Age=43200; SameSite=Lax${COOKIE_SECURE}; HttpOnly`;
+// 退出登录要把 cookie 真正清掉（HttpOnly，前端 JS 删不了），两个 cookie 一起过期
+const clearCookies = () => [
+  `pwc_token=; Path=/${COOKIE_DOMAIN}; Max-Age=0; SameSite=None${COOKIE_SECURE}; HttpOnly`,
+  `pcadmin=; Path=/${COOKIE_DOMAIN}; Max-Age=0; SameSite=Lax${COOKIE_SECURE}; HttpOnly`,
+];
 const safeEq = (a, b) => {
   a = Buffer.from(String(a || "")); b = Buffer.from(String(b || ""));
   return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
@@ -975,13 +980,14 @@ http.createServer((req, res) => {
   }
   if (p === "/api/auth/logout" && req.method === "POST") {
     return readBody().then(() => {
-      if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+      // 幂等：未登录也照样清 cookie 返回 200，避免「退不出去」
+      if (!user) return send(200, JSON.stringify({ ok: true, already: true }), null, { "set-cookie": clearCookies() });
       const token = String(req.headers.authorization || "").replace("Bearer ", "")
         || ((req.headers.cookie || "").match(/pwc_token=([a-f0-9]+)/) || [])[1] || "";
       // keep the row for the audit trail; mark it revoked instead of deleting it
       db.prepare("UPDATE sessions SET revoked = 1, last_seen = datetime('now') WHERE token = ?").run(token);
       logEvent("logout", user.id, user.email, req.headers);
-      send(200, JSON.stringify({ ok: true }));
+      send(200, JSON.stringify({ ok: true }), null, { "set-cookie": clearCookies() });
     });
   }
   if (p === "/api/user" && req.method === "GET") {
