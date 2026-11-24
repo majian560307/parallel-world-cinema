@@ -751,6 +751,7 @@ function applyLang(){
 $('langs').onclick = function(e){ var l = e.target.getAttribute && e.target.getAttribute('data-l'); if (l) setLang(l); };
 $('t-in').onclick = function(){ tab(1); };
 $('t-up').onclick = function(){ tab(0); };
+if ((location.hash || '') === '#reg') { try { tab(0); } catch(e) {} }
 function tab(isLogin){ reg = !isLogin; $('t-in').className = isLogin ? 'on' : ''; $('t-up').className = isLogin ? '' : 'on'; $('goBtn').textContent = isLogin ? t('goLogin') : t('goReg'); $('pw').autocomplete = isLogin ? 'current-password' : 'new-password'; }
 $('mt-mine').onclick = function(){ mineTab(0); };
 $('mt-all').onclick = function(){ mineTab(1); };
