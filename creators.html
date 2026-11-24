@@ -574,7 +574,7 @@ body::before{background:radial-gradient(120% 80% at 50% -10%,rgba(212,175,106,.0
 
     <form class="pwc-form corners rise" id="submitform" novalidate>
       <h3>极速投稿 <span class="en">Fast Submit</span></h3>
-      <p class="pwc-tip">填 4 项，30 秒直达放映厅收件箱；带 <b>*</b> 必填。</p>
+      <p class="pwc-tip">填 4 项，30 秒送达排片人；带 * 号必填，登录后可在个人中心看到回复。</p>
       <label>作品类型 *
         <select id="pf-type">
           <option value="film">影视 · 进放映厅</option>
@@ -768,10 +768,11 @@ function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value
 (function(){
   var f=document.getElementById('submitform'); if(!f) return;
   var msg=document.getElementById('pf-msg'), btn=document.getElementById('pf-send');
-  var T={zh:{wait:'寄出中…',ok:'已收到投稿，排片人会在个人中心回复你 ✦',net:'网络不畅，请稍后再试',fill:'作品名和作品链接是必填的'},
-         en:{wait:'Sending…',ok:'Submission received — a programmer will reply in your account ✦',net:'Network issue — retry in a moment',fill:'Title and link are required'},
-         ja:{wait:'送信中…',ok:'投稿を受け付けました ✦',net:'通信エラー。しばらくして再度お試しください',fill:'タイトルとリンクは必須です'},
-         ko:{wait:'보내는 중…',ok:'투고가 접수되었습니다 ✦',net:'네트워크 오류 — 잠시 후 다시 시도하세요',fill:'제목과 링크는 필수입니다'}};
+  var REG='https://app.osmaigc.com/pc-submit/account#reg';
+  var T={zh:{wait:'寄出中…',ok:'已收到投稿，排片人会在个人中心回复你 ✦',net:'网络不畅，请稍后再试',fill:'作品名和作品链接是必填的',need:'投稿须先注册账号（免费，验证后赠 5 张通行证）',go:'去注册 / 登录 →'},
+         en:{wait:'Sending…',ok:'Submission received — a programmer will reply in your account ✦',net:'Network issue — retry in a moment',fill:'Title and link are required',need:'Submissions require a free account (5 Passes gifted after verification)',go:'Sign up / sign in →'},
+         ja:{wait:'送信中…',ok:'投稿を受け付けました ✦',net:'通信エラー。しばらくして再度お試しください',fill:'タイトルとリンクは必須です',need:'投稿にはアカウント登録が必要です（無料・認証後にパス5枚進呈）',go:'登録 / ログインへ →'},
+         ko:{wait:'보내는 중…',ok:'투고가 접수되었습니다 ✦',net:'네트워크 오류 — 잠시 후 다시 시도하세요',fill:'제목과 링크는 필수입니다',need:'투고하려면 무료 계정이 필요합니다 (인증 후 패스 5장 증정)',go:'가입 / 로그인 →'}};
   function L(){ var c=(document.cookie.match(/(?:^|; )pc_lang=([a-zA-Z]+)/)||[])[1]; var l=((c||localStorage.getItem('pc_lang')||'zh')).slice(0,2); return T[l]||T.zh; }
   f.addEventListener('submit',function(ev){
     ev.preventDefault();
@@ -782,6 +783,19 @@ function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value
            desc:document.getElementById('pf-desc').value.trim()};
     if(!d.name||!d.link){ msg.textContent=L().fill; msg.className='pwc-msg err'; return; }
     btn.disabled=true; msg.className='pwc-msg'; msg.textContent=L().wait;
+    fetch('https://app.osmaigc.com/pc-submit/api/user',{credentials:'include'})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(u){
+        if(!u||!u.email){
+          msg.innerHTML=L().need+' <a href="'+REG+'" class="cyan">'+L().go+'</a>';
+          msg.className='pwc-msg err'; btn.disabled=false; return;
+        }
+        send(d);
+      })
+      .catch(function(){ msg.innerHTML=L().need+' <a href="'+REG+'" class="cyan">'+L().go+'</a>'; msg.className='pwc-msg err'; btn.disabled=false; });
+  });
+  function send(d){
+    btn.disabled=true; msg.className='pwc-msg'; msg.textContent=L().wait;
     fetch('https://app.osmaigc.com/pc-submit/api/submissions',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:JSON.stringify(d)})
       .then(function(r){ return r.json(); })
       .then(function(j){
@@ -789,7 +803,7 @@ function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value
         else { msg.textContent=L().net; msg.className='pwc-msg err'; btn.disabled=false; }
       })
       .catch(function(){ msg.textContent=L().net; msg.className='pwc-msg err'; btn.disabled=false; });
-  });
+  }
 })();
 </script>
 <script src="i18n_en.json.js?v=5"></script>
