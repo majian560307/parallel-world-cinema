@@ -5,6 +5,9 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import nodemailer from "nodemailer";
+import dns from "node:dns/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3010);
 const TO = "yanaranft@gmail.com";
@@ -14,6 +17,24 @@ const DB_PATH = process.env.DB_PATH || "/opt/submit/pc-center.db";
 const LEGACY_JSONL = "/opt/submit/submissions.jsonl";
 const RATE_MS = 10_000;
 const last = new Map();
+
+// ---- 邮箱验证与注册风控（新增）----
+const PUBLIC_BASE = process.env.PC_PUBLIC_BASE || "https://app.osmaigc.com/pc-submit";
+const MAIL_MODE = String(process.env.MAIL_MODE || "smtp").toLowerCase();  // smtp | outbox(只落盘, 用于验收)
+const MAIL_OUTBOX = process.env.MAIL_OUTBOX || "/opt/submit/mail-outbox";
+const MAIL_HOST = process.env.SMTP_HOST || "smtpdm.aliyun.com";
+const MAIL_PORT = Number(process.env.SMTP_PORT || 465);
+const MAIL_FROM = process.env.MAIL_FROM || process.env.SMTP_USER || "noreply@osmaigc.com";
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || "平行世界电影院";
+const VERIFY_TTL_H = Number(process.env.VERIFY_TTL_H || 24);
+const SIGNUP_BONUS = Number(process.env.SIGNUP_BONUS || 10);
+// REQUIRE_EMAIL_VERIFY=1：注册不发通证，点邮件确认后才发；=0：注册即发（邮件通道未就绪时的过渡态）
+const REQUIRE_VERIFY = String(process.env.REQUIRE_EMAIL_VERIFY || "1") !== "0";
+const RESERVED_TLDS = new Set(["invalid", "test", "local", "localhost", "example", "internal", "lan", "home", "corp", "arpa"]);
+const MX_CACHE = new Map();
+const signupIp = new Map();  // ip -> [ts]
+const signupNet = new Map(); // /24 -> [ts]
+const EMAIL_RE = /^[a-z0-9._%+\-]{1,64}@[a-z0-9][a-z0-9.\-]{0,188}\.[a-z]{2,24}$/i;
 
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
@@ -89,6 +110,30 @@ ensureCol("users", "attack", "INTEGER DEFAULT 0");
 ensureCol("users", "defense", "INTEGER DEFAULT 0");
 ensureCol("users", "spirit", "INTEGER DEFAULT 0");
 ensureCol("users", "agility", "INTEGER DEFAULT 0");
+ensureCol("users", "email_verified", "INTEGER DEFAULT 0");
+ensureCol("users", "email_verified_at", "TEXT");
+ensureCol("users", "signup_ip", "TEXT DEFAULT ''");
+db.exec(`
+CREATE TABLE IF NOT EXISTS email_tokens (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  kind TEXT DEFAULT 'verify',
+  exp INTEGER NOT NULL,
+  used_at TEXT,
+  at TEXT,
+  ip TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_etok_user ON email_tokens (user_id, kind);
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+CREATE INDEX IF NOT EXISTS idx_users_signup_ip ON users (signup_ip);
+`);
+// 一次性迁移：本版之前已存在的账号视为已验证（不夺走他们已有的礼包）
+if (!db.prepare("SELECT 1 AS x FROM meta WHERE k = ?").get("verified_grandfather")) {
+  const bjNow = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 19).replace("T", " ");
+  const g = db.prepare("UPDATE users SET email_verified = 1, email_verified_at = ? WHERE COALESCE(email_verified, 0) = 0").run(bjNow());
+  db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)").run("verified_grandfather", String(g.changes));
+}
 db.exec(`CREATE TABLE IF NOT EXISTS owned (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -243,15 +288,26 @@ const verifyPass = (pw, stored) => {
 };
 
 const transporter = nodemailer.createTransport({
-  host: "smtp.qq.com", port: 465, secure: true, connectionTimeout: 15000, greetingTimeout: 15000,
+  host: MAIL_HOST, port: MAIL_PORT, secure: MAIL_PORT === 465, connectionTimeout: 15000, greetingTimeout: 15000,
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
 });
+// 统一发信口：MAIL_MODE=outbox 时只写文件（验收用，不依赖真实邮箱）
+async function sendMail({ to, subject, html, text }) {
+  const msg = { from: `"${MAIL_FROM_NAME}" <${MAIL_FROM}>`, to, subject, html, text };
+  if (MAIL_MODE === "outbox") {
+    fs.mkdirSync(MAIL_OUTBOX, { recursive: true });
+    const f = path.join(MAIL_OUTBOX, `${Date.now()}-${crypto.randomBytes(3).toString("hex")}.json`);
+    fs.writeFileSync(f, JSON.stringify({ ...msg, at: nowStr() }, null, 2));
+    return { outbox: f };
+  }
+  return transporter.sendMail(msg);
+}
 const TYPE_CN = { film: "放映 · FILM", game: "街区 · GAME" };
 const ST = { received: ["已收到", "#d4af6a"], reviewing: ["审核中", "#9ef0e7"], scheduled: ["已排片", "#8ee28e"], rejected: ["退回", "#ff9d8a"] };
 
 const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 const clip = (s, n) => String(s ?? "").trim().slice(0, n);
-const pubUser = (u) => ({ id: u.id, email: u.email, name: u.name || "", isAdmin: !!u.is_admin, created_at: u.created_at, lang: u.lang || "zh", passes: u.passes || 0 });
+const pubUser = (u) => ({ id: u.id, email: u.email, name: u.name || "", isAdmin: !!u.is_admin, created_at: u.created_at, lang: u.lang || "zh", passes: u.passes || 0, emailVerified: !!u.email_verified });
 
 function userByReq(headers) {
   const token = String(headers.authorization || "").replace("Bearer ", "")
@@ -291,9 +347,132 @@ const shortUa = (ua) => {
   return os + " · " + br;
 };
 
+// ---------- 邮箱验证 / 反刷号 工具 ----------
+function loadDisposable() {
+  const cands = [
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "disposable-domains.txt"),
+    "/opt/submit/disposable-domains.txt",
+  ];
+  for (const f of cands) {
+    try {
+      const txt = fs.readFileSync(f, "utf8");
+      const set = new Set(txt.split(/\r?\n/).map((x) => x.trim().toLowerCase()).filter((x) => x && !x.startsWith("#")));
+      console.log(`[mail] disposable domains loaded: ${set.size} from ${f}`);
+      return set;
+    } catch {}
+  }
+  console.log("[mail] disposable domain list missing (ok, skipped)");
+  return new Set();
+}
+const DISPOSABLE = loadDisposable();
+
+async function emailDeliverable(email) {
+  if (!EMAIL_RE.test(email)) return { ok: false, reason: "邮箱格式不对" };
+  const dom = email.split("@")[1];
+  if (/^\d+(\.\d+)*$/.test(dom)) return { ok: false, reason: "邮箱格式不对" };
+  const tld = dom.split(".").pop();
+  if (RESERVED_TLDS.has(tld)) return { ok: false, reason: "这个邮箱域名收不到信" };
+  if (DISPOSABLE.has(dom) || DISPOSABLE.has(dom.replace(/^www\./, ""))) return { ok: false, reason: "请用常用邮箱，不支持一次性邮箱" };
+  const hit = MX_CACHE.get(dom);
+  if (hit && Date.now() - hit.at < 6 * 3600e3) return hit.res;
+  let res;
+  try {
+    const mx = await dns.resolveMx(dom);
+    res = mx && mx.length ? { ok: true } : { ok: false, reason: "这个邮箱域名收不到信" };
+  } catch (e) {
+    const soft = !["ENOTFOUND", "ENODATA", "ENODOMAIN"].includes(String(e && e.code));
+    res = soft ? { ok: true, soft: true } : { ok: false, reason: "这个邮箱域名不存在" };
+  }
+  MX_CACHE.set(dom, { at: Date.now(), res });
+  return res;
+}
+
+// 注册限流：同一 IP 每小时 5 个、每天 12 个；同一 /24 网段每小时 20 个
+function signupGate(ip) {
+  const now = Date.now();
+  const keep = (arr, ms) => arr.filter((t) => now - t < ms);
+  const net = String(ip || "").split(".").slice(0, 3).join(".") + ".";
+  const h = keep(signupIp.get(ip) || [], 3600e3);
+  const d = keep(signupIp.get(ip) || [], 86400e3);
+  const n = keep(signupNet.get(net) || [], 3600e3);
+  if (h.length >= 5) return { code: "too_many_signups", hint: "同一网络注册太频繁，请 1 小时后再试" };
+  if (d.length >= 12) return { code: "too_many_signups", hint: "同一网络今天注册太多，请明天再试" };
+  if (n.length >= 20) return { code: "too_many_signups", hint: "这个网络注册太频繁，请 1 小时后再试" };
+  return null;
+}
+function noteSignup(ip) {
+  const now = Date.now();
+  const net = String(ip || "").split(".").slice(0, 3).join(".") + ".";
+  signupIp.set(ip, [...(signupIp.get(ip) || []), now].filter((t) => now - t < 86400e3));
+  signupNet.set(net, [...(signupNet.get(net) || []), now].filter((t) => now - t < 3600e3));
+}
+
+function newVerifyToken(uid, email, ip, kind = "verify") {
+  const token = crypto.randomBytes(24).toString("hex");
+  const exp = Math.floor(Date.now() / 1000) + VERIFY_TTL_H * 3600;
+  db.prepare("INSERT INTO email_tokens (token, user_id, email, kind, exp, at, ip) VALUES (?,?,?,?,?,?,?)")
+    .run(token, uid, email, kind, exp, nowStr(), ip || "");
+  return token;
+}
+
+function verifyLink(token) {
+  return `${PUBLIC_BASE}/api/auth/verify?t=${token}`;
+}
+
+function verifyMailHtml(email, link) {
+  return `<div style="font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#0b0d10;padding:28px;color:#e8c987">
+<div style="max-width:520px;margin:0 auto;background:#12151a;border:1px solid #2a2f36;border-radius:12px;padding:26px">
+<div style="font-size:12px;letter-spacing:3px;color:#8a7a55">PARALLEL WORLD CINEMA</div>
+<h2 style="color:#e8c987;font-weight:600;margin:10px 0 8px">确认你的邮箱</h2>
+<p style="color:#cfc6ae;line-height:1.7;font-size:14px">${email} 正在注册「平行世界电影院」。点下面的按钮完成确认，即可领取 ${SIGNUP_BONUS} 张通证。</p>
+<p style="margin:22px 0"><a href="${link}" style="display:inline-block;background:#d4af6a;color:#0b0d10;text-decoration:none;padding:12px 26px;border-radius:8px;font-weight:600">确认邮箱并领取通证</a></p>
+<p style="color:#7d7460;font-size:12px;line-height:1.6">链接 ${VERIFY_TTL_H} 小时内有效，只能点一次。如果不是你本人操作，忽略这封邮件即可，账号不会生效任何资产。<br>如按钮无法点击，复制到浏览器打开：<br><span style="color:#9ef0e7;word-break:break-all">${link}</span></p>
+</div></div>`;
+}
+
+async function issueVerifyMail(uid, email, ip) {
+  const token = newVerifyToken(uid, email, ip);
+  const link = verifyLink(token);
+  let state = { sent: false };
+  try {
+    await sendMail({
+      to: email,
+      subject: `确认邮箱 · 领取 ${SIGNUP_BONUS} 张通证｜平行世界电影院`,
+      html: verifyMailHtml(email, link),
+      text: `确认你的邮箱：${link}\n链接 ${VERIFY_TTL_H} 小时内有效。`,
+    });
+    state = { sent: true };
+  } catch (e) {
+    state = { sent: false, error: String((e && e.message) || e).slice(0, 120) };
+    console.log(`[mail] verify send failed for ${email}: ${state.error}`);
+  }
+  if (MAIL_MODE === "outbox") state.link = link; // 仅验收环境回传链接
+  return state;
+}
+
+function grantVerifyBonus(uid) {
+  const done = db.prepare("SELECT 1 AS x FROM pass_ledger WHERE user_id = ? AND reason = ?").get(uid, "邮箱验证赠送");
+  if (done) return { granted: 0 };
+  db.prepare("UPDATE users SET passes = COALESCE(passes, 0) + ? WHERE id = ?").run(SIGNUP_BONUS, uid);
+  db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, SIGNUP_BONUS, "邮箱验证赠送", nowStr());
+  return { granted: SIGNUP_BONUS };
+}
+
+const verifyPage = (title, body, ok) => `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · 平行世界电影院</title></head>
+<body style="margin:0;background:#0b0d10;color:#e8c987;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center">
+<div style="max-width:460px;padding:34px;border:1px solid #2a2f36;border-radius:14px;background:#12151a;text-align:center">
+<div style="font-size:12px;letter-spacing:3px;color:#8a7a55">PARALLEL WORLD CINEMA</div>
+<h1 style="font-size:22px;margin:14px 0 10px;color:${ok ? "#8ee28e" : "#ff9d8a"}">${title}</h1>
+<p style="color:#cfc6ae;font-size:14px;line-height:1.8;margin:0 0 22px">${body}</p>
+<a href="${PUBLIC_BASE}/" style="display:inline-block;background:#d4af6a;color:#0b0d10;text-decoration:none;padding:11px 24px;border-radius:8px;font-weight:600">回到电影院</a>
+</div></body></html>`;
+
 function obsData() {
   const users = db.prepare(`
     SELECT u.id, u.email, u.is_admin, u.created_at, u.last_login, u.last_ip,
+      COALESCE(u.email_verified, 0) AS verified, u.signup_ip,
+      (SELECT COUNT(*) FROM users x WHERE x.signup_ip = u.signup_ip AND COALESCE(u.signup_ip,'') <> '') AS ip_accounts,
       (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND COALESCE(s.revoked,0) = 0) AS live,
       (SELECT COUNT(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'login') AS logins,
       (SELECT COUNT(*) FROM submissions b WHERE b.user_id = u.id) AS subs,
@@ -305,6 +484,9 @@ function obsData() {
     users: users.length,
     loginsToday: one("SELECT COUNT(*) c FROM login_events WHERE kind = 'login' AND at >= datetime('now','start of day')"),
     active7: one("SELECT COUNT(DISTINCT user_id) c FROM login_events WHERE kind = 'login' AND at >= datetime('now','-7 days')"),
+    verified: one("SELECT COUNT(*) c FROM users WHERE COALESCE(email_verified,0) = 1"),
+    unverified: one("SELECT COUNT(*) c FROM users WHERE COALESCE(email_verified,0) = 0"),
+    dupIp: one("SELECT COUNT(*) c FROM (SELECT signup_ip FROM users WHERE COALESCE(signup_ip,'') <> '' GROUP BY signup_ip HAVING COUNT(*) > 1)"),
     online: one("SELECT COUNT(DISTINCT user_id) c FROM sessions WHERE COALESCE(revoked,0) = 0 AND last_seen >= datetime('now','-30 minutes')"),
     fails: one("SELECT COUNT(*) c FROM login_events WHERE kind = 'fail' AND at >= datetime('now','-1 day')"),
     subs: one("SELECT COUNT(*) c FROM submissions"),
@@ -355,9 +537,9 @@ function adminPage(rows, obs) {
   const stat = (n, lab, cls) => `<div class="st"><b class="${cls || ''}">${n ?? 0}</b><span>${lab}</span></div>`;
   const obsHtml = `<h2>台前观测 · AUDIENCE</h2>
 <div class="stats">${stat(s.users, "注册用户")}${stat(s.online, "此刻在线")}${stat(s.loginsToday, "今日登录")}${stat(s.active7, "7日活跃")}${stat(s.fails, "24h 失败登录", s.fails > 0 ? "warn" : "")}${stat(s.subs, "投稿总数")}</div>
-<table><thead><tr><th>#</th><th>账号</th><th>注册</th><th>最后登录</th><th>登录次数</th><th>最后 IP</th><th>投稿</th><th>在线</th></tr></thead><tbody>
-${obs.users.map((u) => `<tr${u.is_admin ? ' class="adm"' : ''}><td>${u.id}</td><td>${esc(u.email)}${u.is_admin ? ' <span class="tag">管理</span>' : ''}</td><td>${bj(u.created_at)}</td><td>${bj(u.last_login)}</td><td>${u.logins || 0}</td><td>${esc(u.last_ip || "—")}</td><td>${u.subs || 0}</td><td>${u.live && u.seen && (Date.now() - new Date(String(u.seen).replace(" ", "T") + "Z").getTime() < 1800e3) ? '<span class="dot on"></span>在馆' : '<span class="dot"></span>—'}</td></tr>`).join("")}
-${obs.users.length ? "" : '<tr><td colspan="8" class="empty">还没有注册用户</td></tr>'}
+<table><thead><tr><th>#</th><th>账号</th><th>邮箱</th><th>注册</th><th>最后登录</th><th>登录次数</th><th>最后 IP</th><th>投稿</th><th>在线</th></tr></thead><tbody>
+${obs.users.map((u) => `<tr${u.is_admin ? ' class="adm"' : ''}><td>${u.id}</td><td>${esc(u.email)}${u.is_admin ? ' <span class="tag">管理</span>' : ''}</td><td>${u.verified ? '<span class="tag ok">已验证</span>' : '<span class="tag warn">未验证</span>'}</td><td>${bj(u.created_at)}</td><td>${bj(u.last_login)}</td><td>${u.logins || 0}</td><td>${esc(u.last_ip || "—")}${u.ip_accounts > 1 ? ` <span class="tag warn" title="同一注册 IP 下有 ${u.ip_accounts} 个账号">同IP×${u.ip_accounts}</span>` : ""}</td><td>${u.subs || 0}</td><td>${u.live && u.seen && (Date.now() - new Date(String(u.seen).replace(" ", "T") + "Z").getTime() < 1800e3) ? '<span class="dot on"></span>在馆' : '<span class="dot"></span>—'}</td></tr>`).join("")}
+${obs.users.length ? "" : '<tr><td colspan="9" class="empty">还没有注册用户</td></tr>'}
 </tbody></table>
 <h2>登录流水 · LAST 80 EVENTS</h2>
 <table><thead><tr><th>时间</th><th>事件</th><th>账号</th><th>IP</th><th>设备</th></tr></thead><tbody>
@@ -402,6 +584,8 @@ th{text-align:left;font-weight:500;color:#8b8272;letter-spacing:.06em;font-size:
 td{padding:7px 6px;border-bottom:1px solid rgba(255,255,255,.05);color:#cfc6ae;white-space:nowrap}
 tr.adm td{color:#e8c987}
 .tag{font-size:10px;border:1px solid rgba(212,175,106,.5);border-radius:99px;padding:1px 7px;color:#d4af6a}
+.tag.ok{color:#8ee28e;border-color:rgba(142,226,142,.55)}
+.tag.warn{color:#ff9d8a;border-color:rgba(255,157,138,.55)}
 .dot{display:inline-block;width:7px;height:7px;border-radius:99px;background:#3a342c;margin-right:5px;vertical-align:0}
 .dot.on{background:#8ee28e;box-shadow:0 0 8px #8ee28e}
 .ev{font-size:11px;border-radius:99px;padding:1.5px 8px;letter-spacing:.04em}
@@ -537,7 +721,10 @@ function applyLang(){
   $('outBtn').textContent = t('out'); $('rcap').textContent = t('cap');
   $('mt-mine').textContent = t('mine'); $('mt-all').textContent = t('all'); $('backLink').textContent = t('back');
   var bs = $('langs').children; for (var i = 0; i < bs.length; i++) bs[i].className = 'lang-btn' + (bs[i].getAttribute('data-l') === LANG ? ' on' : '');
-  if (me) { $('who').textContent = me.email + (adminMode ? ' · ' + t('admin') : ''); resident(); render(true); }
+  if (me) {
+    $('who').innerHTML = me.email + (me.emailVerified ? '' : ' · <a href="#" data-resend="1" style="color:#ff9d8a">邮箱未验证，点此重发确认信</a>') + (adminMode ? ' · ' + t('admin') : '');
+    resident(); render(true);
+  }
 }
 $('langs').onclick = function(e){ var l = e.target.getAttribute && e.target.getAttribute('data-l'); if (l) setLang(l); };
 $('t-in').onclick = function(){ tab(1); };
@@ -584,7 +771,10 @@ function card(r){
     (r.contact ? '<div class="meta" style="margin-top:5px">' + t('contact') + esc(r.contact) + '</div>' : '') +
     (r.reply ? '<div class="reply">' + t('official') + esc(r.reply) + '</div>' : '') + ops + '</div>';
 }
-document.addEventListener('click', function(e){ var b = e.target.closest && e.target.closest('[data-save]'); if (!b) return;
+document.addEventListener('click', function(e){
+  var rs = e.target.closest && e.target.closest('[data-resend]');
+  if (rs) { e.preventDefault(); rs.textContent = '发送中…'; api('/api/auth/verify/resend', {}).then(function(r){ rs.textContent = (r.j && r.j.ok) ? '确认信已发出，请查邮箱' : ((r.j && r.j.hint) || '发送失败，稍后再试'); }); return; }
+  var b = e.target.closest && e.target.closest('[data-save]'); if (!b) return;
   var id = b.getAttribute('data-save');
   api('/api/submissions/set', { id: id, status: $('st-' + id).value, reply: $('rp-' + id).value }).then(function(res){
     $('sv-' + id).textContent = res.j.ok ? t('saved') : t('fail');
@@ -645,20 +835,33 @@ http.createServer((req, res) => {
   const readBody = () => new Promise((done) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { try { body = JSON.parse(b || "{}"); } catch { body = {}; } done(); }); });
 
   if (p === "/api/auth/register" && req.method === "POST") {
-    return readBody().then(() => {
-      const email = String(body.email || "").trim().toLowerCase(), password = String(body.password || "");
+    return readBody().then(async () => {
+      const email = String(body.email || "").trim().toLowerCase().slice(0, 190), password = String(body.password || "");
       if (!email || !password) return send(400, JSON.stringify({ error: "email and password required" }));
       if (password.length < 6) return send(400, JSON.stringify({ error: "password too short (min 6)" }));
-      if (db.prepare("SELECT id FROM users WHERE LOWER(email) = ?").get(email)) return send(409, JSON.stringify({ error: "email already registered" }));
-      const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin, passes) VALUES (?, ?, ?, ?)").run(email, hashPass(password), email === ADMIN_EMAIL ? 1 : 0, 10);
-      db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(info.lastInsertRowid, 10, "注册赠送", nowStr());
-      const token = crypto.randomBytes(32).toString("hex");
       const ip = clientIp(req.headers);
-      db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, info.lastInsertRowid, ip, clientUa(req.headers));
-      db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, info.lastInsertRowid);
-      logEvent("register", info.lastInsertRowid, email, req.headers);
-      send(200, JSON.stringify({ token, user: pubUser({ id: info.lastInsertRowid, email, is_admin: email === ADMIN_EMAIL, passes: 10 }) }), null, { "set-cookie": cookieFor(token) });
-    });
+      const gate = signupGate(ip);
+      if (gate) return send(429, JSON.stringify({ error: gate.code, hint: gate.hint }));
+      if (db.prepare("SELECT id FROM users WHERE LOWER(email) = ?").get(email)) return send(409, JSON.stringify({ error: "email already registered" }));
+      // 真邮箱体检：格式 + 域名 MX + 一次性邮箱黑名单（挡不住全部，但刷号成本从 0 变成必须持有真邮箱）
+      const dl = await emailDeliverable(email);
+      if (!dl.ok) return send(400, JSON.stringify({ error: "bad_email", hint: dl.reason }));
+      const isAdmin = email === ADMIN_EMAIL ? 1 : 0;
+      const bonusNow = REQUIRE_VERIFY ? 0 : SIGNUP_BONUS;
+      const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin, passes, email_verified, signup_ip) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(email, hashPass(password), isAdmin, bonusNow, REQUIRE_VERIFY ? 0 : 1, ip);
+      const uid = Number(info.lastInsertRowid);
+      if (bonusNow) db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, bonusNow, "注册赠送", nowStr());
+      const token = crypto.randomBytes(32).toString("hex");
+      db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, uid, ip, clientUa(req.headers));
+      db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, uid);
+      noteSignup(ip);
+      logEvent("register", uid, email, req.headers);
+      let mail = null;
+      if (REQUIRE_VERIFY) mail = await issueVerifyMail(uid, email, ip);
+      const fresh = db.prepare("SELECT * FROM users WHERE id = ?").get(uid);
+      send(200, JSON.stringify({ token, user: pubUser(fresh), need_verify: REQUIRE_VERIFY, email_verified: false, mail }), null, { "set-cookie": cookieFor(token) });
+    }).catch((e) => send(500, JSON.stringify({ error: "register failed", detail: String((e && e.message) || e).slice(0, 140) })));
   }
   if (p === "/api/auth/login" && req.method === "POST") {
     return readBody().then(() => {
@@ -694,6 +897,36 @@ http.createServer((req, res) => {
   if (p === "/api/user" && req.method === "GET") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
     return send(200, JSON.stringify(pubUser(user)));
+  }
+
+  // ---- API: 邮箱验证（点击即完成，注册流程不多一步）----
+  if (p === "/api/auth/verify" && req.method === "GET") {
+    const tk = String(u.searchParams.get("t") || "").slice(0, 80);
+    const row = tk ? db.prepare("SELECT * FROM email_tokens WHERE token = ? AND kind = 'verify'").get(tk) : null;
+    const html = (code, title, body, ok) => send(code, verifyPage(title, body, ok), null, { "content-type": "text/html; charset=utf-8" });
+    if (!row) return html(404, "链接无效", "这个确认链接不存在，请回到电影院重新发送确认邮件。", false);
+    if (row.used_at) return html(200, "邮箱已确认过", "这个链接已经用过了，直接登录即可。", true);
+    if (row.exp < Math.floor(Date.now() / 1000)) return html(410, "链接已过期", "确认链接已超时，请登录后在页面顶部点“重发确认邮件”。", false);
+    db.prepare("UPDATE email_tokens SET used_at = ? WHERE token = ?").run(nowStr(), tk);
+    db.prepare("UPDATE users SET email_verified = 1, email_verified_at = ? WHERE id = ?").run(nowStr(), row.user_id);
+    const g = grantVerifyBonus(row.user_id);
+    logEvent("verify", row.user_id, row.email, req.headers);
+    return html(200, "邮箱已确认", `${esc(row.email)} 已验证。${g.granted ? `${g.granted} 张通证已到账，` : ""}回到客户端刷新即可使用。`, true);
+  }
+  if (p === "/api/auth/verify/resend" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    if (user.email_verified) return send(200, JSON.stringify({ ok: true, already: true }));
+    return (async () => {
+    const rlKey = "vmail:" + user.id;
+    const recent = db.prepare("SELECT COUNT(*) AS c FROM email_tokens WHERE user_id = ? AND kind = 'verify' AND exp > ?").get(user.id, Math.floor(Date.now() / 1000) - VERIFY_TTL_H * 3600 + 300);
+    if (recent && recent.c >= 5) return send(429, JSON.stringify({ error: "too_many_mails", hint: "今天发送次数用完了，明天再试" }));
+    const nowS = Math.floor(Date.now() / 1000);
+    const latest = db.prepare("SELECT MAX(exp) AS e FROM email_tokens WHERE user_id = ? AND kind = 'verify'").get(user.id);
+    if (latest && latest.e && nowS - (latest.e - VERIFY_TTL_H * 3600) < 60) return send(429, JSON.stringify({ error: "too_many_mails", hint: "稍等一分钟再重发" }));
+    noteFail(rlKey);
+    const mail = await issueVerifyMail(user.id, user.email, clientIp(req.headers));
+    return send(200, JSON.stringify({ ok: true, mail }));
+    })();
   }
 
   // ---- API: 账号资产（云端唯一真源；App/网页只做缓存镜像）----
@@ -753,6 +986,7 @@ http.createServer((req, res) => {
   // 游戏内消耗（观测/私语/按摩…）：带 key 幂等扣费；同 key 可退一次，杜绝客户端无限退款
   if (p === "/api/passes/spend" && req.method === "POST") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    if (!user.email_verified) return send(403, JSON.stringify({ error: "email_not_verified", hint: "请先点邮箱里的确认链接，确认后即可消费通证" }));
     return readBody().then(() => {
       const amount = Math.max(1, Math.min(999, Math.round(Number(body.amount) || 1)));
       const key = String(body.key || "").slice(0, 80);
@@ -866,6 +1100,7 @@ http.createServer((req, res) => {
   }
   if (p === "/api/stage/buy" && req.method === "POST") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    if (!user.email_verified) return send(403, JSON.stringify({ error: "email_not_verified", hint: "请先确认邮箱再购票" }));
     return readBody().then(() => {
       const id = Number(body.show_id);
       const key = String(body.key || "").slice(0, 80);
