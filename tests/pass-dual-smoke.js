@@ -139,6 +139,16 @@ const call = async (p, opt = {}) => {
   r = await call("/api/passes/spend", { method: "POST", cookie: cB, body: { amount: 2, key: "w1", purpose: "watch", reason: "看片" } });
   ok(r.status === 200 && r.j.green === 3, `看片先花绿通 → ${JSON.stringify(r.j)}`);
 
+  // 15) 绿通退回不续命：退回的绿通沿用原到期日
+  db.exec(`UPDATE pass_batches SET remaining=0 WHERE user_id=${u2} AND kind='green'`);
+  db.prepare(`INSERT INTO pass_batches (user_id,kind,qty,remaining,unit_cash,source,reason,expires_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run(u2, "green", 3, 3, 0, "signup", "到期日测试", "2027-06-30");
+  r = await call("/api/passes/spend", { method: "POST", cookie: cB, body: { amount: 1, key: "w2", purpose: "watch", reason: "到期日测试" } });
+  ok(r.status === 200 && r.j.green === 2, `花1张到期日测试绿通 → ${JSON.stringify(r.j)}`);
+  await call("/api/passes/refund", { method: "POST", cookie: cB, body: { key: "w2" } });
+  const back = db.prepare("SELECT expires_at FROM pass_batches WHERE user_id=? AND kind='green' AND source='refund' ORDER BY id DESC LIMIT 1").get(u2);
+  ok(back && back.expires_at === "2027-06-30", `退回绿通沿用原到期日 → ${back && back.expires_at}`);
+
   console.log(out.join("\n"));
   console.log(process.exitCode ? "SMOKE_FAILED" : "SMOKE_OK");
 })().catch((e) => { console.log("ERR", e && e.stack || e); process.exitCode = 1; });

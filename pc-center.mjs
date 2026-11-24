@@ -306,7 +306,8 @@ function creditPasses(uid, qty, opt = {}) {
       return passBalances(uid);
     }
   }
-  const exp = Number(opt.days) > 0 ? bjDate(Number(opt.days)) : null;
+  // 退回原批次时沿用原到期日：绿通不能靠「花掉再退」续命
+  const exp = opt.expires ? String(opt.expires).slice(0, 10) : (Number(opt.days) > 0 ? bjDate(Number(opt.days)) : null);
   db.prepare(`INSERT INTO pass_batches (user_id, kind, qty, remaining, unit_cash, source, ref, reason, expires_at, at)
     VALUES (?,?,?,?,?,?,?,?,?,?)`).run(uid, kind, n, n, unitCash, src, ref || null, String(opt.reason || "").slice(0, 80), exp, nowStr());
   db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)")
@@ -340,7 +341,7 @@ function debitPasses(uid, qty, reason, opts = {}) {
   for (const [b, take] of plan) {
     db.prepare("UPDATE pass_batches SET remaining = remaining - ? WHERE id = ? AND remaining >= ?").run(take, b.id, take);
     const u = used.find((x) => x.kind === b.kind && x.unit_cash === (Number(b.unit_cash) || 0));
-    if (u) u.n += take; else used.push({ kind: b.kind, n: take, unit_cash: Number(b.unit_cash) || 0 });
+    if (u) u.n += take; else used.push({ kind: b.kind, n: take, unit_cash: Number(b.unit_cash) || 0, exp: b.expires_at || null });
   }
   db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, -n, String(reason).slice(0, 120), nowStr());
   const b = syncPassTotals(uid);
@@ -1324,7 +1325,8 @@ http.createServer((req, res) => {
       try { back = JSON.parse(s.spend_json || "[]"); } catch { back = []; }
       if (!back.length) back = [{ kind: "gold", n: s.amount, unit_cash: 0 }];
       for (const x of back) {
-        creditPasses(user.id, x.n, { kind: x.kind, unitCash: x.unit_cash, source: "refund", reason: `退回 · ${s.reason || ""}` });
+        const exp = x.exp || (x.kind === "green" ? bjDate(PROMO.greenDays) : null);
+        creditPasses(user.id, x.n, { kind: x.kind, unitCash: x.unit_cash, source: "refund", expires: exp, reason: `退回 · ${s.reason || ""}` });
       }
       db.prepare("UPDATE pass_spends SET refunded = 1 WHERE key = ?").run(key);
       send(200, JSON.stringify({ passes: currentPasses(user.id), key }));
