@@ -325,7 +325,8 @@ function userByReq(headers) {
 }
 
 // ---------- observability helpers ----------
-const clientIp = (h) => (String(h["x-forwarded-for"] || h["x-real-ip"] || "").split(",")[0].trim() || "unknown");
+let CUR_IP = "";
+const clientIp = (h) => (String(h["x-forwarded-for"] || h["x-real-ip"] || "").split(",")[0].trim() || CUR_IP || "unknown");
 const clientUa = (h) => clip(h["user-agent"] || "", 180);
 function logEvent(kind, userId, email, headers) {
   try {
@@ -617,7 +618,8 @@ body{margin:0;min-height:100vh;color:var(--ivory);font:15px/1.7 var(--sans);back
 .tag{color:var(--dim);font-size:12.5px;letter-spacing:.18em;text-align:center;margin:0 0 34px}
 .tag b{color:var(--amber);font-weight:500}
 .panel{background:linear-gradient(170deg,rgba(236,231,220,.055),rgba(236,231,220,.02));border:1px solid var(--line);border-radius:18px;padding:26px 26px 24px;box-shadow:0 24px 60px rgba(0,0,0,.45),inset 0 1px 0 rgba(243,220,160,.12)}
-.tabs{display:flex;gap:26px;border-bottom:1px solid rgba(212,175,106,.16);margin:0 0 22px;padding:0 2px}
+.tabs{display:flex;gap:26px;border-bottom:1px solid rgba(212,175,106,.16);margin:0 0 22px;padding:0 2px;position:relative;z-index:5}
+[hidden]{display:none !important}
 .tabs button{position:relative;background:none;border:0;color:var(--dim);font:15px/1 var(--sans);letter-spacing:.14em;padding:8px 2px 12px;cursor:pointer;transition:color .2s}
 .tabs button.on{color:var(--amber-hi)}
 .tabs button::after{content:"";position:absolute;left:8%;right:8%;bottom:-1px;height:2px;background:linear-gradient(90deg,transparent,var(--amber),transparent);opacity:0;transition:opacity .25s}
@@ -673,15 +675,15 @@ a{color:var(--amber);text-decoration-color:rgba(212,175,106,.4)}
 <div class="brand"><h1 id="brandH">我的平行世界</h1><span class="en">Parallel World Cinema</span></div>
 <p class="tag" id="tagline"></p>
 <div class="panel" id="auth">
-<div class="tabs"><button id="t-in" class="on"></button><button id="t-up"></button></div>
-<input id="email" type="email" autocomplete="email"><input id="pw" type="password" autocomplete="current-password" style="margin-top:12px">
-<button class="go" id="goBtn"></button><div class="msg" id="msg"></div>
+<div class="tabs"><button id="t-in" class="on">登录</button><button id="t-up">注册</button></div>
+<input id="email" type="email" autocomplete="email" placeholder="邮箱"><input id="pw" type="password" autocomplete="current-password" placeholder="密码（至少 6 位）" style="margin-top:12px">
+<button class="go" id="goBtn">登录</button><div class="msg" id="msg"></div>
 </div>
 <div id="mine" hidden>
 <div class="hdr"><span class="em" id="who"></span><button class="ghost" style="width:auto;margin:0" id="outBtn"></button></div>
 <div class="panel resident" id="resident"><div class="r-cap" id="rcap"></div><div class="r-grid" id="rgrid"></div></div>
 <div class="tabs" id="mineTabs" hidden style="margin-top:-6px"><button id="mt-mine" class="on"></button><button id="mt-all"></button></div>
-<div class="tabs" id="admTabs" hidden style="margin-top:-6px"><button id="at-ov" class="on">概览</button><button id="at-us">用户</button><button id="at-lg">登录流水</button><button id="at-sb">投稿审核</button></div>
+<div class="tabs" id="admTabs" hidden><button id="at-ov" class="on">概览</button><button id="at-us">用户</button><button id="at-lg">登录流水</button><button id="at-sb">投稿审核</button></div>
 <div id="obs" hidden></div>
 <div id="plist"></div>
 </div>
@@ -761,6 +763,7 @@ $('at-lg').onclick = function(){ admTab('lg'); };
 $('at-sb').onclick = function(){ admTab('sb'); };
 function admTab(k){
   admSel = k;
+  try { if (location.hash !== '#adm-' + k) history.replaceState(null, '', '#adm-' + k); } catch(e) {}
   ['ov','us','lg','sb'].forEach(function(x){ $('at-' + x).className = (x === k) ? 'on' : ''; });
   $('obs').hidden = (k === 'sb');
   $('plist').hidden = (k !== 'sb');
@@ -770,7 +773,7 @@ function admTab(k){
 function shortUa(ua){
   ua = String(ua || ''); if (!ua) return '—';
   var os = (ua.match(/Windows NT|Macintosh|iPhone|iPad|Android|Linux/) || ['?'])[0];
-  var br = (ua.match(/Edg\/|Chrome\/|Firefox\/|Safari\//) || ['?'])[0].replace('/', '');
+  var br = ua.indexOf('Edg') >= 0 ? 'Edge' : ua.indexOf('Chrome') >= 0 ? 'Chrome' : ua.indexOf('Firefox') >= 0 ? 'Firefox' : ua.indexOf('Safari') >= 0 ? 'Safari' : '?';
   return os.replace('Windows NT', 'Win').replace('Macintosh', 'Mac') + ' · ' + br;
 }
 function paintObs(){
@@ -886,7 +889,7 @@ async function boot(){
   $('auth').hidden = true; $('mine').hidden = false;
   $('who').textContent = me.email + (adminMode ? ' · ' + t('admin') : '');
   $('mineTabs').hidden = true;
-  if (adminMode) { $('admTabs').hidden = false; resident(); admTab('ov'); }
+  if (adminMode) { $('mineTabs').hidden = true; $('admTabs').hidden = false; resident(); var hk = (location.hash || '').replace('#adm-', ''); admTab(['ov','us','lg','sb'].indexOf(hk) >= 0 ? hk : 'ov'); }
   else render();
 }
 // 只有运营台口令、没登录居民账号时：直接进统一后台（无居民档案可看）
@@ -906,6 +909,7 @@ boot();
 </script></body></html>`;
 
 http.createServer((req, res) => {
+  CUR_IP = String((req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.headers["x-real-ip"] || (req.socket && req.socket.remoteAddress) || "");
   const u = new URL(req.url, "http://x");
   const corsH = corsHeaders(req.headers.origin);
   const send = (code, body, type, extra) => { res.writeHead(code, { "content-type": type || "application/json; charset=utf-8", ...corsH, ...extra }); res.end(body); };
