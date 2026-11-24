@@ -10,7 +10,7 @@ const PORT = Number(process.env.PORT || 3010);
 const TO = "yanaranft@gmail.com";
 const ADMIN_EMAIL = "yanaranft@gmail.com";
 const ADMIN_PASS = process.env.ADMIN_PASS || "changeme";
-const DB_PATH = "/opt/submit/pc-center.db";
+const DB_PATH = process.env.DB_PATH || "/opt/submit/pc-center.db";
 const LEGACY_JSONL = "/opt/submit/submissions.jsonl";
 const RATE_MS = 10_000;
 const last = new Map();
@@ -46,6 +46,38 @@ CREATE TABLE IF NOT EXISTS game_profile (
   synced_at TEXT
 );`);
 db.prepare("UPDATE users SET is_admin = 1 WHERE lower(email) = ?").run(ADMIN_EMAIL);
+
+// ---------- observability migration (additive, safe to re-run) ----------
+const ensureCol = (table, col, ddl) => { try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`); } catch { /* exists */ } };
+ensureCol("sessions", "ip", "TEXT DEFAULT ''");
+ensureCol("sessions", "ua", "TEXT DEFAULT ''");
+ensureCol("sessions", "last_seen", "TEXT");
+ensureCol("sessions", "revoked", "INTEGER DEFAULT 0");
+ensureCol("users", "last_login", "TEXT");
+ensureCol("users", "last_ip", "TEXT DEFAULT ''");
+db.exec(`CREATE TABLE IF NOT EXISTS login_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT DEFAULT (datetime('now')),
+  kind TEXT,
+  user_id INTEGER,
+  email TEXT,
+  ip TEXT,
+  ua TEXT
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_ev_kind_at ON login_events(kind, at)`);
+try {
+  db.exec(`UPDATE users SET last_login = (SELECT MAX(created_at) FROM sessions s WHERE s.user_id = users.id)
+           WHERE (last_login IS NULL OR last_login = '')
+             AND EXISTS (SELECT 1 FROM sessions s WHERE s.user_id = users.id)`);
+  db.exec(`UPDATE sessions SET last_seen = created_at WHERE last_seen IS NULL`);
+  // seed the audit log from pre-existing sessions so the history is not blank on day one
+  if (db.prepare("SELECT COUNT(*) c FROM login_events").get().c === 0) {
+    const hist = db.prepare("SELECT s.user_id, s.created_at, u.email FROM sessions s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at").all();
+    const ins = db.prepare("INSERT INTO login_events (at,kind,user_id,email,ip,ua) VALUES (?,?,?,?,?,?)");
+    for (const h of hist) ins.run(h.created_at, "login", h.user_id, h.email || "", "", "history");
+    if (hist.length) console.log("backfilled login_events:", hist.length);
+  }
+} catch (e) { console.log("backfill skip:", String(e).slice(0, 80)); }
 
 // one-time migration of legacy JSONL archive
 try {
@@ -88,14 +120,79 @@ function userByReq(headers) {
   const token = String(headers.authorization || "").replace("Bearer ", "")
     || ((headers.cookie || "").match(/pwc_token=([a-f0-9]+)/) || [])[1] || "";
   if (!token) return null;
-  const row = db.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?").get(token);
-  return row || null;
+  const row = db.prepare("SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND COALESCE(s.revoked,0) = 0").get(token);
+  if (!row) return null;
+  // heartbeat: keeps "online now" meaningful without spamming the row
+  try {
+    const cur = db.prepare("SELECT last_seen FROM sessions WHERE token = ?").get(token);
+    if (!cur || !cur.last_seen || Date.now() - new Date(cur.last_seen.replace(" ", "T") + "Z").getTime() > 60_000)
+      db.prepare("UPDATE sessions SET last_seen = datetime('now') WHERE token = ?").run(token);
+  } catch { /* heartbeat is best-effort */ }
+  return row;
 }
+
+// ---------- observability helpers ----------
+const clientIp = (h) => (String(h["x-forwarded-for"] || h["x-real-ip"] || "").split(",")[0].trim() || "unknown");
+const clientUa = (h) => clip(h["user-agent"] || "", 180);
+function logEvent(kind, userId, email, headers) {
+  try {
+    db.prepare("INSERT INTO login_events (kind,user_id,email,ip,ua) VALUES (?,?,?,?,?)")
+      .run(kind, userId || null, String(email || "").toLowerCase().slice(0, 120), clientIp(headers || {}), clientUa(headers || {}));
+  } catch (e) { console.log("event log skip:", String(e).slice(0, 60)); }
+}
+const bj = (s) => {
+  if (!s) return "—";
+  const d = new Date(String(s).replace(" ", "T") + "Z");
+  return isNaN(d) ? String(s) : new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 16).replace("T", " ");
+};
+const shortUa = (ua) => {
+  const s = String(ua || "");
+  if (s === "history") return "历史会话";
+  const os = /Windows/.test(s) ? "Windows" : /Mac OS X|Macintosh/.test(s) ? "macOS" : /Android/.test(s) ? "Android" : /iPhone|iPad/.test(s) ? "iOS" : /Linux/.test(s) ? "Linux" : "?";
+  const br = /Edg\//.test(s) ? "Edge" : /Chrome\//.test(s) ? "Chrome" : /Safari\//.test(s) ? "Safari" : /Firefox\//.test(s) ? "Firefox" : /curl/.test(s) ? "curl" : "?";
+  return os + " · " + br;
+};
+
+function obsData() {
+  const users = db.prepare(`
+    SELECT u.id, u.email, u.is_admin, u.created_at, u.last_login, u.last_ip,
+      (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND COALESCE(s.revoked,0) = 0) AS live,
+      (SELECT COUNT(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'login') AS logins,
+      (SELECT COUNT(*) FROM submissions b WHERE b.user_id = u.id) AS subs,
+      (SELECT MAX(last_seen) FROM sessions s WHERE s.user_id = u.id) AS seen
+    FROM users u ORDER BY COALESCE(u.last_login, u.created_at) DESC`).all();
+  const events = db.prepare("SELECT * FROM login_events ORDER BY id DESC LIMIT 80").all();
+  const one = (q) => { try { return db.prepare(q).get().c; } catch { return 0; } };
+  const stats = {
+    users: users.length,
+    loginsToday: one("SELECT COUNT(*) c FROM login_events WHERE kind = 'login' AND at >= datetime('now','start of day')"),
+    active7: one("SELECT COUNT(DISTINCT user_id) c FROM login_events WHERE kind = 'login' AND at >= datetime('now','-7 days')"),
+    online: one("SELECT COUNT(DISTINCT user_id) c FROM sessions WHERE COALESCE(revoked,0) = 0 AND last_seen >= datetime('now','-30 minutes')"),
+    fails: one("SELECT COUNT(*) c FROM login_events WHERE kind = 'fail' AND at >= datetime('now','-1 day')"),
+    subs: one("SELECT COUNT(*) c FROM submissions"),
+  };
+  return { users, events, stats };
+}
+
 const cookieFor = (token) => `pwc_token=${token}; Path=/; Domain=.osmaigc.com; Max-Age=2592000; SameSite=None; Secure`;
 const ADMIN_COOKIE = (pw) => `pcadmin=${pw}; Path=/; Domain=.osmaigc.com; Max-Age=86400; SameSite=None; Secure`;
 
 // ---------- admin page ----------
-function adminPage(rows) {
+function adminPage(rows, obs) {
+  obs = obs || { users: [], events: [], stats: {} };
+  const s = obs.stats || {};
+  const stat = (n, lab, cls) => `<div class="st"><b class="${cls || ''}">${n ?? 0}</b><span>${lab}</span></div>`;
+  const obsHtml = `<h2>台前观测 · AUDIENCE</h2>
+<div class="stats">${stat(s.users, "注册用户")}${stat(s.online, "此刻在线")}${stat(s.loginsToday, "今日登录")}${stat(s.active7, "7日活跃")}${stat(s.fails, "24h 失败登录", s.fails > 0 ? "warn" : "")}${stat(s.subs, "投稿总数")}</div>
+<table><thead><tr><th>#</th><th>账号</th><th>注册</th><th>最后登录</th><th>登录次数</th><th>最后 IP</th><th>投稿</th><th>在线</th></tr></thead><tbody>
+${obs.users.map((u) => `<tr${u.is_admin ? ' class="adm"' : ''}><td>${u.id}</td><td>${esc(u.email)}${u.is_admin ? ' <span class="tag">管理</span>' : ''}</td><td>${bj(u.created_at)}</td><td>${bj(u.last_login)}</td><td>${u.logins || 0}</td><td>${esc(u.last_ip || "—")}</td><td>${u.subs || 0}</td><td>${u.live && u.seen && (Date.now() - new Date(String(u.seen).replace(" ", "T") + "Z").getTime() < 1800e3) ? '<span class="dot on"></span>在馆' : '<span class="dot"></span>—'}</td></tr>`).join("")}
+${obs.users.length ? "" : '<tr><td colspan="8" class="empty">还没有注册用户</td></tr>'}
+</tbody></table>
+<h2>登录流水 · LAST 80 EVENTS</h2>
+<table><thead><tr><th>时间</th><th>事件</th><th>账号</th><th>IP</th><th>设备</th></tr></thead><tbody>
+${obs.events.map((e) => `<tr><td>${bj(e.at)}</td><td><span class="ev ev-${esc(e.kind)}">${({ login: "登录", register: "注册", logout: "退出", fail: "失败" }[e.kind]) || esc(e.kind)}</span></td><td>${esc(e.email || (e.user_id ? "用户#" + e.user_id : "—"))}</td><td>${esc(e.ip || "—")}</td><td>${esc(shortUa(e.ua))}</td></tr>`).join("")}
+${obs.events.length ? "" : '<tr><td colspan="5" class="empty">暂无登录流水（面板上线后开始记录）</td></tr>'}
+</tbody></table>`;
   const cards = rows.map((r) => {
     const [st, color] = ST[r.status] || ST.received;
     return `<div class="card">
@@ -110,7 +207,7 @@ function adminPage(rows) {
 </form></div>`;
   }).join("");
   return `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>投稿后台 · 平行世界电影院</title><style>
-body{background:#0d0b08;color:#f4f0e6;font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:820px;margin:0 auto;padding:28px 18px}
+body{background:#0d0b08;color:#f4f0e6;font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;max-width:1040px;margin:0 auto;padding:28px 18px}
 h1{font-size:20px;letter-spacing:.1em;border-bottom:1px solid rgba(212,175,106,.35);padding-bottom:14px}
 h1 small{float:right;font-size:12px;color:#8b8272;font-weight:400;margin-top:6px}
 .card{border:1px solid rgba(212,175,106,.22);border-radius:12px;padding:16px 18px;margin:14px 0;background:rgba(255,255,255,.03)}
@@ -121,8 +218,27 @@ a{color:#d4af6a}
 .ops{margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 select,input{background:rgba(255,255,255,.05);border:1px solid rgba(212,175,106,.4);border-radius:8px;padding:8px 12px;color:#f4f0e6;font:inherit;font-size:13px}
 button{background:#d4af6a;color:#0d0b08;border:0;border-radius:99px;padding:8px 20px;font-size:13px;cursor:pointer}
-.empty{color:#8b8272;text-align:center;padding:60px 0}
-</style><h1>平行世界 · 投稿后台 <small>${rows.length} 份 · <a href="/pc-submit/account" style="font-size:12px">用户门户→</a></small></h1>${cards || '<p class="empty">暂无投稿</p>'}`;
+.empty{color:#8b8272;text-align:center;padding:40px 0}
+h2{font-size:13px;letter-spacing:.2em;color:#8b8272;font-weight:500;margin:30px 0 10px;border-bottom:1px solid rgba(212,175,106,.14);padding-bottom:8px}
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+@media(max-width:760px){.stats{grid-template-columns:repeat(3,1fr)}}
+.st{border:1px solid rgba(212,175,106,.18);border-radius:10px;padding:10px 6px;text-align:center;background:rgba(255,255,255,.02)}
+.st b{display:block;font-size:20px;color:#e8c987;line-height:1.25}
+.st b.warn{color:#ff9d8a}
+.st span{font-size:11px;color:#8b8272;letter-spacing:.05em}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px}
+th{text-align:left;font-weight:500;color:#8b8272;letter-spacing:.06em;font-size:11px;border-bottom:1px solid rgba(212,175,106,.2);padding:7px 6px}
+td{padding:7px 6px;border-bottom:1px solid rgba(255,255,255,.05);color:#cfc6ae;white-space:nowrap}
+tr.adm td{color:#e8c987}
+.tag{font-size:10px;border:1px solid rgba(212,175,106,.5);border-radius:99px;padding:1px 7px;color:#d4af6a}
+.dot{display:inline-block;width:7px;height:7px;border-radius:99px;background:#3a342c;margin-right:5px;vertical-align:0}
+.dot.on{background:#8ee28e;box-shadow:0 0 8px #8ee28e}
+.ev{font-size:11px;border-radius:99px;padding:1.5px 8px;letter-spacing:.04em}
+.ev-login{background:rgba(142,226,142,.14);color:#8ee28e}
+.ev-register{background:rgba(212,175,106,.16);color:#d4af6a}
+.ev-logout{background:rgba(255,255,255,.06);color:#8b8272}
+.ev-fail{background:rgba(255,157,138,.14);color:#ff9d8a}
+</style><h1>平行世界 · 运营台 <small>${rows.length} 份投稿 · <a href="/pc-submit/account" style="font-size:12px">用户门户→</a></small></h1>${obsHtml}<h2>投稿 · SUBMISSIONS</h2>${cards || '<p class="empty">暂无投稿</p>'}`;
 }
 
 // ---------- portal (login / register / my page) ----------
@@ -367,7 +483,10 @@ http.createServer((req, res) => {
       if (db.prepare("SELECT id FROM users WHERE LOWER(email) = ?").get(email)) return send(409, JSON.stringify({ error: "email already registered" }));
       const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin) VALUES (?, ?, ?)").run(email, hashPass(password), email === ADMIN_EMAIL ? 1 : 0);
       const token = crypto.randomBytes(32).toString("hex");
-      db.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, info.lastInsertRowid);
+      const ip = clientIp(req.headers);
+      db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, info.lastInsertRowid, ip, clientUa(req.headers));
+      db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, info.lastInsertRowid);
+      logEvent("register", info.lastInsertRowid, email, req.headers);
       send(200, JSON.stringify({ token, user: pubUser({ id: info.lastInsertRowid, email, is_admin: email === ADMIN_EMAIL }) }), null, { "set-cookie": cookieFor(token) });
     });
   }
@@ -375,16 +494,26 @@ http.createServer((req, res) => {
     return readBody().then(() => {
       const email = String(body.email || "").trim().toLowerCase();
       const u2 = db.prepare("SELECT * FROM users WHERE LOWER(email) = ?").get(email);
-      if (!u2 || !verifyPass(String(body.password || ""), u2.pass_hash)) return send(401, JSON.stringify({ error: "invalid email or password" }));
+      if (!u2 || !verifyPass(String(body.password || ""), u2.pass_hash)) {
+        logEvent("fail", u2 ? u2.id : null, email, req.headers);
+        return send(401, JSON.stringify({ error: "invalid email or password" }));
+      }
       const token = crypto.randomBytes(32).toString("hex");
-      db.prepare("INSERT INTO sessions (token, user_id) VALUES (?, ?)").run(token, u2.id);
+      const ip = clientIp(req.headers);
+      db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, u2.id, ip, clientUa(req.headers));
+      db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, u2.id);
+      logEvent("login", u2.id, u2.email, req.headers);
       send(200, JSON.stringify({ token, user: pubUser(u2) }), null, { "set-cookie": cookieFor(token) });
     });
   }
   if (p === "/api/auth/logout" && req.method === "POST") {
     return readBody().then(() => {
       if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
-      db.prepare("DELETE FROM sessions WHERE token = ?").run(String(req.headers.authorization || "").replace("Bearer ", ""));
+      const token = String(req.headers.authorization || "").replace("Bearer ", "")
+        || ((req.headers.cookie || "").match(/pwc_token=([a-f0-9]+)/) || [])[1] || "";
+      // keep the row for the audit trail; mark it revoked instead of deleting it
+      db.prepare("UPDATE sessions SET revoked = 1, last_seen = datetime('now') WHERE token = ?").run(token);
+      logEvent("logout", user.id, user.email, req.headers);
       send(200, JSON.stringify({ ok: true }));
     });
   }
@@ -453,6 +582,13 @@ http.createServer((req, res) => {
     });
   }
 
+  // ---- API: admin observability (users + login history) ----
+  if (p === "/api/admin/users" && req.method === "GET") {
+    if (!user || !user.is_admin) return send(403, JSON.stringify({ error: "admin only" }));
+    const obs = obsData();
+    return send(200, JSON.stringify({ ok: true, stats: obs.stats, users: obs.users, events: obs.events }));
+  }
+
   // ---- portal page ----
   if (p === "/account" && req.method === "GET") return send(200, PORTAL, "text/html; charset=utf-8", { "cache-control": "no-cache" });
 
@@ -481,7 +617,7 @@ http.createServer((req, res) => {
       });
     }
     const rows = db.prepare("SELECT * FROM submissions ORDER BY id DESC").all();
-    return send(200, adminPage(rows), "text/html; charset=utf-8");
+    return send(200, adminPage(rows, obsData()), "text/html; charset=utf-8");
   }
 
   // default: anonymous intake (legacy path used by creators.html)
