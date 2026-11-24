@@ -497,12 +497,17 @@ function obsData() {
 const cookieFor = (token) => `pwc_token=${token}; Path=/; Domain=.osmaigc.com; Max-Age=2592000; SameSite=None; Secure; HttpOnly`;
 // 管理 cookie 只放签名，不放口令本身（口令进 URL/Referer/日志 = 泄露权限面）
 const adminSig = () => crypto.createHmac("sha256", "pwc-admin-v1|" + ADMIN_PASS).update("pcadmin").digest("hex").slice(0, 40);
-const ADMIN_COOKIE = () => `pcadmin=${adminSig()}; Path=/; Domain=.osmaigc.com; Max-Age=43200; SameSite=Lax; Secure; HttpOnly`;
+// cookie 属性可测试放宽（生产默认 Domain=.osmaigc.com + Secure；COOKIE_DOMAIN=none / COOKIE_INSECURE=1 仅在本地验收脚本里用）
+const COOKIE_DOMAIN = (process.env.COOKIE_DOMAIN === "none") ? "" : `; Domain=${process.env.COOKIE_DOMAIN || ".osmaigc.com"}`;
+const COOKIE_SECURE = process.env.COOKIE_INSECURE === "1" ? "" : "; Secure";
+const ADMIN_COOKIE = () => `pcadmin=${adminSig()}; Path=/${COOKIE_DOMAIN}; Max-Age=43200; SameSite=Lax${COOKIE_SECURE}; HttpOnly`;
 const safeEq = (a, b) => {
   a = Buffer.from(String(a || "")); b = Buffer.from(String(b || ""));
   return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
 };
 const adminCookieOk = (headers) => safeEq(((headers.cookie || "").match(/pcadmin=([^;]+)/) || [])[1], adminSig());
+// 统一后台（2026-11-25 合并）：账号管理员 或 运营台口令 cookie 任一即可；/admin 退化为口令入口，界面全在门户 /account
+const adminGate = (user, headers) => !!((user && user.is_admin) || adminCookieOk(headers));
 
 // CORS 白名单：旧版把请求 Origin 原样回显 + allow-credentials，等于任何网站都能带用户 cookie 读我们的 API
 const ORIGIN_OK = new Set([
@@ -649,6 +654,19 @@ a{color:var(--amber);text-decoration-color:rgba(212,175,106,.4)}
 .r-lab{display:block;font-size:11px;letter-spacing:.14em;color:var(--dim);margin-top:3px}
 .r-wait{color:var(--dim);text-align:center;font-size:13px;letter-spacing:.08em;grid-column:1/-1}
 .r-foot{font-size:11px;color:var(--dim);letter-spacing:.06em;text-align:center;margin-top:12px;grid-column:1/-1}
+.ostat{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 8px;padding:6px 0 10px}
+@media (max-width:480px){.ostat{grid-template-columns:repeat(2,1fr)}}
+.ostat>div{text-align:center;border:1px solid rgba(212,175,106,.16);border-radius:12px;padding:12px 6px;background:rgba(236,231,220,.03)}
+.ostat b{display:block;font:600 20px/1.25 var(--serif);color:var(--amber-hi)}
+.ostat span{font-size:11px;letter-spacing:.1em;color:var(--dim)}
+.otbl{overflow-x:auto;border:1px solid rgba(212,175,106,.16);border-radius:12px}
+.otbl table{width:100%;border-collapse:collapse;font-size:12.5px;white-space:nowrap}
+.otbl th{text-align:left;font-weight:500;color:var(--amber);letter-spacing:.08em;font-size:11px;padding:9px 10px;border-bottom:1px solid rgba(212,175,106,.2);background:rgba(236,231,220,.04)}
+.otbl td{padding:8px 10px;border-bottom:1px solid rgba(236,231,220,.06);color:#ddd6c6}
+.otbl tr:last-child td{border-bottom:0}
+.tg{font-style:normal;font-size:10px;letter-spacing:.08em;padding:1.5px 7px;border-radius:99px;border:1px solid rgba(212,175,106,.45);color:var(--amber-hi)}
+.tg.ok{color:#8ee28e;border-color:rgba(142,226,142,.45)}
+.tg.wn{color:#ffb27a;border-color:rgba(255,157,138,.45)}
 </style></head><body>
 <div class="langs" id="langs"><button class="lang-btn" data-l="zh">中文</button><button class="lang-btn" data-l="en">EN</button><button class="lang-btn" data-l="ja">日本語</button><button class="lang-btn" data-l="ko">한국어</button></div>
 <div class="wrap">
@@ -663,6 +681,8 @@ a{color:var(--amber);text-decoration-color:rgba(212,175,106,.4)}
 <div class="hdr"><span class="em" id="who"></span><button class="ghost" style="width:auto;margin:0" id="outBtn"></button></div>
 <div class="panel resident" id="resident"><div class="r-cap" id="rcap"></div><div class="r-grid" id="rgrid"></div></div>
 <div class="tabs" id="mineTabs" hidden style="margin-top:-6px"><button id="mt-mine" class="on"></button><button id="mt-all"></button></div>
+<div class="tabs" id="admTabs" hidden style="margin-top:-6px"><button id="at-ov" class="on">概览</button><button id="at-us">用户</button><button id="at-lg">登录流水</button><button id="at-sb">投稿审核</button></div>
+<div id="obs" hidden></div>
 <div id="plist"></div>
 </div>
 <p class="tag" style="margin-top:26px"><a id="backLink" href="https://global.osmaigc.com" style="letter-spacing:.14em"></a></p>
@@ -733,6 +753,60 @@ function tab(isLogin){ reg = !isLogin; $('t-in').className = isLogin ? 'on' : ''
 $('mt-mine').onclick = function(){ mineTab(0); };
 $('mt-all').onclick = function(){ mineTab(1); };
 function mineTab(a){ showAll = !!a; $('mt-all').className = a ? 'on' : ''; $('mt-mine').className = a ? '' : 'on'; cache = {}; render(true); }
+// ---- 统一后台（合并自原 /admin 运营台）：概览 / 用户 / 登录流水 / 投稿审核 ----
+var admSel = 'ov', obsCache = null;
+$('at-ov').onclick = function(){ admTab('ov'); };
+$('at-us').onclick = function(){ admTab('us'); };
+$('at-lg').onclick = function(){ admTab('lg'); };
+$('at-sb').onclick = function(){ admTab('sb'); };
+function admTab(k){
+  admSel = k;
+  ['ov','us','lg','sb'].forEach(function(x){ $('at-' + x).className = (x === k) ? 'on' : ''; });
+  $('obs').hidden = (k === 'sb');
+  $('plist').hidden = (k !== 'sb');
+  if (k === 'sb') { showAll = true; cache = {}; render(true); return; }
+  paintObs();
+}
+function shortUa(ua){
+  ua = String(ua || ''); if (!ua) return '—';
+  var os = (ua.match(/Windows NT|Macintosh|iPhone|iPad|Android|Linux/) || ['?'])[0];
+  var br = (ua.match(/Edg\/|Chrome\/|Firefox\/|Safari\//) || ['?'])[0].replace('/', '');
+  return os.replace('Windows NT', 'Win').replace('Macintosh', 'Mac') + ' · ' + br;
+}
+function paintObs(){
+  var box = $('obs');
+  if (!obsCache) {
+    box.innerHTML = '<p class="empty skel">读取中…</p>';
+    api('/api/admin/users').then(function(r){
+      if (r.code !== 200) { box.innerHTML = '<p class="empty">' + errText(r.j && r.j.error) + '</p>'; return; }
+      obsCache = r.j; paintObs();
+    });
+    return;
+  }
+  var j = obsCache, s = j.stats || {};
+  if (admSel === 'ov') {
+    var cells = [['注册用户', s.users], ['此刻在线', s.online], ['今日登录', s.loginsToday], ['7 日活跃', s.active7], ['24h 失败登录', s.fails], ['投稿总数', s.subs]];
+    box.innerHTML = '<div class="ostat">' + cells.map(function(c){ return '<div><b>' + (c[1] == null ? '—' : c[1]) + '</b><span>' + c[0] + '</span></div>'; }).join('') + '</div>'
+      + '<p class="meta" style="text-align:center;margin:2px 0 0">数据实时取自服务器 · ' + esc(new Date().toLocaleString('zh-CN')) + '</p>';
+  } else if (admSel === 'us') {
+    var us = j.users || [];
+    box.innerHTML = '<div class="otbl"><table><thead><tr><th>#</th><th>账号</th><th>邮箱</th><th>注册</th><th>最后登录</th><th>次数</th><th>最后 IP</th><th>投稿</th><th>在线</th></tr></thead><tbody>'
+      + us.map(function(u){
+        var live = u.live && u.seen && (Date.now() - new Date(String(u.seen).replace(' ', 'T') + 'Z').getTime() < 1800e3);
+        return '<tr><td>' + u.id + '</td><td>' + esc(u.email) + (u.is_admin ? ' <i class="tg">管理</i>' : '') + '</td>'
+          + '<td>' + (u.verified ? '<i class="tg ok">已验证</i>' : '<i class="tg wn">未验证</i>') + '</td>'
+          + '<td>' + esc(u.created_at || '—') + '</td><td>' + esc(u.last_login || '—') + '</td><td>' + (u.logins || 0) + '</td>'
+          + '<td>' + esc(u.last_ip || '—') + (u.ip_accounts > 1 ? ' <i class="tg wn">同IP×' + u.ip_accounts + '</i>' : '') + '</td>'
+          + '<td>' + (u.subs || 0) + '</td><td>' + (live ? '● 在馆' : '—') + '</td></tr>';
+      }).join('') + (us.length ? '' : '<tr><td colspan="9" style="text-align:center;color:var(--dim)">还没有注册用户</td></tr>') + '</tbody></table></div>';
+  } else {
+    var K = { login: '登录', register: '注册', logout: '退出', fail: '失败登录', buy: '买断', spend: '消费', refund: '退款', admin: '管理登录', verify: '邮箱验证' };
+    var ev = j.events || [];
+    box.innerHTML = '<div class="otbl"><table><thead><tr><th>时间</th><th>事件</th><th>账号</th><th>IP</th><th>设备</th></tr></thead><tbody>'
+      + ev.map(function(e){ return '<tr><td>' + esc(e.at) + '</td><td>' + (K[e.kind] || esc(e.kind)) + '</td><td>' + esc(e.email || (e.user_id ? '用户#' + e.user_id : '—')) + '</td><td>' + esc(e.ip || '—') + '</td><td>' + esc(shortUa(e.ua)) + '</td></tr>'; }).join('')
+      + (ev.length ? '' : '<tr><td colspan="5" style="text-align:center;color:var(--dim)">暂无流水</td></tr>') + '</tbody></table></div>';
+  }
+}
 async function api(p, body, method){
   var r = await fetch(API + p, { method: method || (body ? 'POST' : 'GET'), credentials: 'include', headers: { 'content-type': 'application/json', ...(tok ? { authorization: 'Bearer ' + tok } : {}) }, body: body ? JSON.stringify(body) : undefined });
   return r.json().then(function(j){ return { code: r.status, j: j }; });
@@ -755,7 +829,7 @@ async function go(){
 }
 $('goBtn').onclick = go;
 $('pw').addEventListener('keydown', function(e){ if (e.key === 'Enter') go(); });
-$('outBtn').onclick = async function(){ await api('/api/auth/logout', {}, 'POST'); document.cookie = 'pwc_token=; Max-Age=0; path=/; domain=.osmaigc.com'; localStorage.removeItem('pwc_token'); tok = ''; me = null; cache = {}; location.reload(); };
+$('outBtn').onclick = async function(){ await api('/api/auth/logout', {}, 'POST'); document.cookie = 'pwc_token=; Max-Age=0; path=/; domain=.osmaigc.com'; document.cookie = 'pcadmin=; Max-Age=0; path=/; domain=.osmaigc.com'; localStorage.removeItem('pwc_token'); tok = ''; me = null; cache = {}; location.reload(); };
 function stBadge(s){ var c = { received: '#d4af6a', reviewing: '#9ef0e7', scheduled: '#8ee28e', rejected: '#ff9d8a' }[s] || '#d4af6a'; return '<span class="badge" style="background:' + c + '">' + t('st_' + (s || 'received')) + '</span>'; }
 function stOptions(s){ return ['received','reviewing','scheduled','rejected'].map(function(k){ return '<option value="' + k + '" ' + (k === s ? 'selected' : '') + '>' + t('st_' + k) + '</option>'; }).join(''); }
 function card(r){
@@ -805,15 +879,26 @@ async function resident(){
     + '<div class="r-foot">' + t('sync') + esc(d.synced_at || '') + '</div>';
 }
 async function boot(){
-  if (!tok) return;
+  if (!tok) return adminEnter();
   var m = await api('/api/user');
-  if (m.code !== 200) { localStorage.removeItem('pwc_token'); tok = ''; return; }
+  if (m.code !== 200) { localStorage.removeItem('pwc_token'); tok = ''; return adminEnter(); }
   me = m.j; adminMode = !!me.isAdmin;
   $('auth').hidden = true; $('mine').hidden = false;
   $('who').textContent = me.email + (adminMode ? ' · ' + t('admin') : '');
-  $('mineTabs').hidden = !adminMode;
-  render();
-  resident();
+  $('mineTabs').hidden = true;
+  if (adminMode) { $('admTabs').hidden = false; resident(); admTab('ov'); }
+  else render();
+}
+// 只有运营台口令、没登录居民账号时：直接进统一后台（无居民档案可看）
+async function adminEnter(){
+  var w = await api('/api/whoami');
+  if (w.code !== 200 || !w.j.isAdmin) return;
+  me = { email: w.j.email, isAdmin: true, mode: w.j.mode }; adminMode = true;
+  $('auth').hidden = true; $('mine').hidden = false;
+  if (w.j.mode === 'cookie') $('resident').hidden = true;
+  $('who').textContent = me.email + ' · ' + t('admin');
+  $('mineTabs').hidden = true; $('admTabs').hidden = false;
+  admTab('ov');
 }
 function esc(s){ return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 applyLang();
@@ -1278,11 +1363,11 @@ http.createServer((req, res) => {
     return send(200, JSON.stringify({ submissions: db.prepare("SELECT * FROM submissions WHERE user_id = ? ORDER BY id DESC").all(user.id) }));
   }
   if (p === "/api/submissions/all" && req.method === "GET") {
-    if (!user || !user.is_admin) return send(403, JSON.stringify({ error: "admin only" }));
+    if (!adminGate(user, req.headers)) return send(403, JSON.stringify({ error: "admin only" }));
     return send(200, JSON.stringify({ submissions: db.prepare("SELECT * FROM submissions ORDER BY id DESC").all() }));
   }
   if (p === "/api/submissions/set" && req.method === "POST") {
-    if (!user || !user.is_admin) return send(403, JSON.stringify({ error: "admin only" }));
+    if (!adminGate(user, req.headers)) return send(403, JSON.stringify({ error: "admin only" }));
     return readBody().then(() => {
       const id = Number(body.id);
       const status = ST[body.status] ? body.status : "received";
@@ -1294,9 +1379,15 @@ http.createServer((req, res) => {
 
   // ---- API: admin observability (users + login history) ----
   if (p === "/api/admin/users" && req.method === "GET") {
-    if (!user || !user.is_admin) return send(403, JSON.stringify({ error: "admin only" }));
+    if (!adminGate(user, req.headers)) return send(403, JSON.stringify({ error: "admin only" }));
     const obs = obsData();
     return send(200, JSON.stringify({ ok: true, stats: obs.stats, users: obs.users, events: obs.events }));
+  }
+  // 门户自检：账号登录 或 运营台口令（合并后唯一后台的两条入口）
+  if (p === "/api/whoami" && req.method === "GET") {
+    if (user) return send(200, JSON.stringify({ ok: true, email: user.email, isAdmin: !!user.is_admin, mode: "account" }));
+    if (adminCookieOk(req.headers)) return send(200, JSON.stringify({ ok: true, email: "运营台口令", isAdmin: true, mode: "cookie" }));
+    return send(401, JSON.stringify({ error: "not authenticated" }));
   }
 
   // ---- portal page ----
@@ -1312,7 +1403,7 @@ http.createServer((req, res) => {
       if (!safeEq(pw, ADMIN_PASS)) { noteFail(key); return send(200, loginErrHtml("口令不对，请重试"), "text/html; charset=utf-8"); }
       clearFails(key);
       logEvent("admin", null, "运营台口令登录", req.headers);
-      res.writeHead(302, { location: "/pc-submit/admin", "set-cookie": ADMIN_COOKIE() });
+      res.writeHead(302, { location: "/pc-submit/account", "set-cookie": ADMIN_COOKIE() });
       res.end();
     });
   }
@@ -1321,7 +1412,7 @@ http.createServer((req, res) => {
     return res.end();
   }
   if (p.startsWith("/admin")) {
-    if (!adminCookieOk(req.headers) && !(user && user.is_admin)) {
+    if (!adminGate(user, req.headers)) {
       return send(200, `<!doctype html><html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>运营台</title><body style="background:#0d0b08;color:#f4f0e6;font:16px sans-serif;display:grid;place-items:center;height:100vh"><form method="post" action="/pc-submit/admin" style="text-align:center"><p style="letter-spacing:.2em;color:#d4af6a">平行世界 · 运营台</p><input name="pass" type="password" autocomplete="current-password" placeholder="管理口令" style="background:transparent;border:1px solid #d4af6a;border-radius:8px;padding:10px 16px;color:#f4f0e6;font-size:16px"><button style="margin-left:8px;padding:10px 20px;background:#d4af6a;border:0;border-radius:8px;font-size:15px">进入</button></form></body></html>`, "text/html; charset=utf-8", { "cache-control": "no-store" });
     }
     if (p === "/admin/set") {
@@ -1330,12 +1421,13 @@ http.createServer((req, res) => {
         const status = ST[f.get("status")] ? f.get("status") : "received";
         const reply = String(f.get("reply") || "").slice(0, 1000);
         db.prepare("UPDATE submissions SET status = ?, reply = ? WHERE id = ?").run(status, reply, id);
-        res.writeHead(302, { location: "/pc-submit/admin" });
+        res.writeHead(302, { location: "/pc-submit/account" });
         return res.end();
       });
     }
-    const rows = db.prepare("SELECT * FROM submissions ORDER BY id DESC").all();
-    return send(200, adminPage(rows, obsData()), "text/html; charset=utf-8", { "cache-control": "no-store" });
+    // 合并后：/admin 不再渲染独立运营台，统一跳门户（界面只剩一套）
+    res.writeHead(302, { location: "/pc-submit/account", "cache-control": "no-store" });
+    return res.end();
   }
 
   // 未匹配路径：只有投稿入口才走匿名收集，其余一律 404
