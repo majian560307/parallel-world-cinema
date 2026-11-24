@@ -79,6 +79,71 @@ try {
   }
 } catch (e) { console.log("backfill skip:", String(e).slice(0, 80)); }
 
+// ── 云端主权层：账号资产（通行证 / 已购片 / 档案）──
+// 口径：核心数据只在这里，客户端(桌面 App / 网页)只做缓存镜像。
+ensureCol("users", "passes", "INTEGER DEFAULT 0");
+ensureCol("users", "name", "TEXT DEFAULT ''");
+ensureCol("users", "gender", "TEXT DEFAULT ''");
+ensureCol("users", "lang", "TEXT DEFAULT 'zh'");
+ensureCol("users", "attack", "INTEGER DEFAULT 0");
+ensureCol("users", "defense", "INTEGER DEFAULT 0");
+ensureCol("users", "spirit", "INTEGER DEFAULT 0");
+ensureCol("users", "agility", "INTEGER DEFAULT 0");
+db.exec(`CREATE TABLE IF NOT EXISTS owned (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  film_id TEXT NOT NULL,
+  title TEXT DEFAULT '', plane_name TEXT DEFAULT '', director TEXT DEFAULT '',
+  duration TEXT DEFAULT '', src TEXT DEFAULT '',
+  first_watched TEXT, last_watched TEXT, watch_count INTEGER DEFAULT 1,
+  UNIQUE(user_id, film_id)
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS pass_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  delta INTEGER NOT NULL,
+  reason TEXT,
+  at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS pass_spends (
+  key TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  amount INTEGER NOT NULL,
+  reason TEXT DEFAULT '',
+  refunded INTEGER DEFAULT 0,
+  at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS films (
+  id TEXT PRIMARY KEY,
+  title TEXT DEFAULT '',
+  price INTEGER DEFAULT 3,
+  updated_at TEXT
+)`);
+// 价目以服务器为唯一真源：App/网页推 manifest 上来，扣费只认 films 表
+const MANIFEST_PATH = process.env.MANIFEST_PATH || "/opt/submit/manifest.json";
+function syncPricesFromManifest() {
+  try {
+    if (!fs.existsSync(MANIFEST_PATH)) return 0;
+    const m = JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+    const up = db.prepare("INSERT INTO films (id,title,price,updated_at) VALUES (?,?,?,datetime('now')) ON CONFLICT(id) DO UPDATE SET title=excluded.title, price=excluded.price, updated_at=datetime('now')");
+    let n = 0;
+    for (const s of (m.schedules || [])) {
+      if (!s.id) continue;
+      up.run(String(s.id), String(s.title || ""), Number.isFinite(Number(s.price)) ? Math.max(0, Math.round(Number(s.price))) : 3);
+      n++;
+    }
+    return n;
+  } catch (e) { console.log("price sync skip:", String(e).slice(0, 80)); return 0; }
+}
+const syncedPrices = syncPricesFromManifest();
+if (syncedPrices) console.log("films priced from manifest:", syncedPrices);
+const filmRow = (id) => db.prepare("SELECT * FROM films WHERE id = ?").get(String(id));
+const ownedList = (uid) => db.prepare("SELECT * FROM owned WHERE user_id = ? ORDER BY last_watched DESC").all(uid)
+  .map((r) => ({ id: r.film_id, title: r.title, planeName: r.plane_name, director: r.director, duration: r.duration, src: r.src, firstWatched: r.first_watched, lastWatched: r.last_watched, watchCount: r.watch_count }));
+const nowStr = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 19).replace("T", " ");
+const currentPasses = (uid) => (db.prepare("SELECT passes FROM users WHERE id = ?").get(uid) || {}).passes || 0;
+const PASS_PACKS = { small: { n: 5, label: "通行包·小" }, mid: { n: 12, label: "通行包·中" }, large: { n: 30, label: "通行包·大" } };
+
 // one-time migration of legacy JSONL archive
 try {
   const n = db.prepare("SELECT COUNT(*) c FROM submissions").get().c;
@@ -114,7 +179,7 @@ const ST = { received: ["已收到", "#d4af6a"], reviewing: ["审核中", "#9ef0
 
 const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 const clip = (s, n) => String(s ?? "").trim().slice(0, n);
-const pubUser = (u) => ({ id: u.id, email: u.email, isAdmin: !!u.is_admin, created_at: u.created_at });
+const pubUser = (u) => ({ id: u.id, email: u.email, name: u.name || "", isAdmin: !!u.is_admin, created_at: u.created_at, lang: u.lang || "zh", passes: u.passes || 0 });
 
 function userByReq(headers) {
   const token = String(headers.authorization || "").replace("Bearer ", "")
@@ -149,6 +214,7 @@ const shortUa = (ua) => {
   const s = String(ua || "");
   if (s === "history") return "历史会话";
   const os = /Windows/.test(s) ? "Windows" : /Mac OS X|Macintosh/.test(s) ? "macOS" : /Android/.test(s) ? "Android" : /iPhone|iPad/.test(s) ? "iOS" : /Linux/.test(s) ? "Linux" : "?";
+  if (/ParallelCinema/.test(s)) return os + " · 桌面客户端";
   const br = /Edg\//.test(s) ? "Edge" : /Chrome\//.test(s) ? "Chrome" : /Safari\//.test(s) ? "Safari" : /Firefox\//.test(s) ? "Firefox" : /curl/.test(s) ? "curl" : "?";
   return os + " · " + br;
 };
@@ -174,9 +240,42 @@ function obsData() {
   return { users, events, stats };
 }
 
-const cookieFor = (token) => `pwc_token=${token}; Path=/; Domain=.osmaigc.com; Max-Age=2592000; SameSite=None; Secure`;
-const ADMIN_COOKIE = (pw) => `pcadmin=${pw}; Path=/; Domain=.osmaigc.com; Max-Age=86400; SameSite=None; Secure`;
+const cookieFor = (token) => `pwc_token=${token}; Path=/; Domain=.osmaigc.com; Max-Age=2592000; SameSite=None; Secure; HttpOnly`;
+// 管理 cookie 只放签名，不放口令本身（口令进 URL/Referer/日志 = 泄露权限面）
+const adminSig = () => crypto.createHmac("sha256", "pwc-admin-v1|" + ADMIN_PASS).update("pcadmin").digest("hex").slice(0, 40);
+const ADMIN_COOKIE = () => `pcadmin=${adminSig()}; Path=/; Domain=.osmaigc.com; Max-Age=43200; SameSite=Lax; Secure; HttpOnly`;
+const safeEq = (a, b) => {
+  a = Buffer.from(String(a || "")); b = Buffer.from(String(b || ""));
+  return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
+};
+const adminCookieOk = (headers) => safeEq(((headers.cookie || "").match(/pcadmin=([^;]+)/) || [])[1], adminSig());
 
+// CORS 白名单：旧版把请求 Origin 原样回显 + allow-credentials，等于任何网站都能带用户 cookie 读我们的 API
+const ORIGIN_OK = new Set([
+  "https://global.osmaigc.com", "https://app.osmaigc.com", "https://www.osmaigc.com", "https://osmaigc.com",
+  "https://majian560307.github.io", "http://127.0.0.1:7420", "http://localhost:7420",
+]);
+function corsHeaders(origin) {
+  if (!origin) return { "access-control-allow-origin": "*" };
+  if (ORIGIN_OK.has(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) || origin === "null") {
+    return { "access-control-allow-origin": origin, "access-control-allow-credentials": "true", vary: "origin" };
+  }
+  return { vary: "origin" }; // 不在白名单：不回 ACAO，浏览器侧读不到
+}
+
+// 撞库/刷口令限流：10 分钟窗口内同一 IP+账号键失败 8 次即 429
+const fails = new Map();
+function tooManyFails(key, max = 8, winMs = 600_000) {
+  const rec = fails.get(key);
+  if (!rec || Date.now() - rec.at > winMs) return false;
+  return rec.n >= max;
+}
+function noteFail(key) {
+  const rec = fails.get(key);
+  if (!rec || Date.now() - rec.at > 600_000) fails.set(key, { n: 1, at: Date.now() });
+  else { rec.n++; rec.at = Date.now(); }
+}
+function clearFails(key) { fails.delete(key); }
 // ---------- admin page ----------
 function adminPage(rows, obs) {
   obs = obs || { users: [], events: [], stats: {} };
@@ -190,7 +289,7 @@ ${obs.users.length ? "" : '<tr><td colspan="8" class="empty">还没有注册用�
 </tbody></table>
 <h2>登录流水 · LAST 80 EVENTS</h2>
 <table><thead><tr><th>时间</th><th>事件</th><th>账号</th><th>IP</th><th>设备</th></tr></thead><tbody>
-${obs.events.map((e) => `<tr><td>${bj(e.at)}</td><td><span class="ev ev-${esc(e.kind)}">${({ login: "登录", register: "注册", logout: "退出", fail: "失败" }[e.kind]) || esc(e.kind)}</span></td><td>${esc(e.email || (e.user_id ? "用户#" + e.user_id : "—"))}</td><td>${esc(e.ip || "—")}</td><td>${esc(shortUa(e.ua))}</td></tr>`).join("")}
+${obs.events.map((e) => `<tr><td>${bj(e.at)}</td><td><span class="ev ev-${esc(e.kind)}">${({ login: "登录", register: "注册", logout: "退出", fail: "失败", buy: "买断", spend: "消费", refund: "退款", admin: "管理登录" }[e.kind]) || esc(e.kind)}</span></td><td>${esc(e.email || (e.user_id ? "用户#" + e.user_id : "—"))}</td><td>${esc(e.ip || "—")}</td><td>${esc(shortUa(e.ua))}</td></tr>`).join("")}
 ${obs.events.length ? "" : '<tr><td colspan="5" class="empty">暂无登录流水（面板上线后开始记录）</td></tr>'}
 </tbody></table>`;
   const cards = rows.map((r) => {
@@ -461,11 +560,9 @@ boot();
 
 http.createServer((req, res) => {
   const u = new URL(req.url, "http://x");
-  const corsH = req.headers.origin
-    ? { "access-control-allow-origin": req.headers.origin, "access-control-allow-credentials": "true" }
-    : { "access-control-allow-origin": "*" };
+  const corsH = corsHeaders(req.headers.origin);
   const send = (code, body, type, extra) => { res.writeHead(code, { "content-type": type || "application/json; charset=utf-8", ...corsH, ...extra }); res.end(body); };
-  if (req.method === "OPTIONS") { res.writeHead(204, { ...corsH, "access-control-allow-headers": "content-type, authorization", "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-max-age": "86400" }); return res.end(); }
+  if (req.method === "OPTIONS") { res.writeHead(204, { ...corsH, "access-control-allow-headers": "content-type, authorization", "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS", "access-control-max-age": "86400" }); return res.end(); }
   if (req.method === "GET" && req.url === "/healthz") return send(200, "ok", "text/plain");
 
   const p = u.pathname.replace(/^\/pc-submit/, "") || "/";
@@ -493,11 +590,15 @@ http.createServer((req, res) => {
   if (p === "/api/auth/login" && req.method === "POST") {
     return readBody().then(() => {
       const email = String(body.email || "").trim().toLowerCase();
+      const rlKey = "login:" + clientIp(req.headers) + ":" + email;
+      if (tooManyFails(rlKey)) return send(429, JSON.stringify({ error: "too_many_attempts", retry_after: 600 }));
       const u2 = db.prepare("SELECT * FROM users WHERE LOWER(email) = ?").get(email);
       if (!u2 || !verifyPass(String(body.password || ""), u2.pass_hash)) {
+        noteFail(rlKey);
         logEvent("fail", u2 ? u2.id : null, email, req.headers);
         return send(401, JSON.stringify({ error: "invalid email or password" }));
       }
+      clearFails(rlKey);
       const token = crypto.randomBytes(32).toString("hex");
       const ip = clientIp(req.headers);
       db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, u2.id, ip, clientUa(req.headers));
@@ -520,6 +621,125 @@ http.createServer((req, res) => {
   if (p === "/api/user" && req.method === "GET") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
     return send(200, JSON.stringify(pubUser(user)));
+  }
+
+  // ---- API: 账号资产（云端唯一真源；App/网页只做缓存镜像）----
+  if (p === "/api/owned" && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return send(200, JSON.stringify(ownedList(user.id)));
+  }
+  if (p === "/api/owned" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const film = body.film || {};
+      const id = String(film.id || "");
+      const f = id ? filmRow(id) : null;
+      // 服务器没上架的片不认：防止客户端自造 film.id / src 白拿藏品
+      if (!f) return send(404, JSON.stringify({ error: "unknown_film", film: id }));
+      const now = nowStr();
+      const existing = db.prepare("SELECT * FROM owned WHERE user_id = ? AND film_id = ?").get(user.id, id);
+      if (existing) {
+        db.prepare("UPDATE owned SET watch_count = watch_count + 1, last_watched = ?, src = CASE WHEN src = '' THEN ? ELSE src END WHERE user_id = ? AND film_id = ?")
+          .run(now, String(clip(film.src, 500)), user.id, id);
+      } else {
+        const price = f.price | 0;
+        const bal = (db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id) || {}).passes || 0;
+        if (bal < price) return send(402, JSON.stringify({ error: "insufficient_passes", passes: bal, price }));
+        if (price > 0) {
+          db.prepare("UPDATE users SET passes = COALESCE(passes,0) - ? WHERE id = ?").run(price, user.id);
+          db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, -price, `买断《${f.title || id}》`, now);
+        }
+        db.prepare("INSERT INTO owned (user_id,film_id,title,plane_name,director,duration,src,first_watched,last_watched,watch_count) VALUES (?,?,?,?,?,?,?,?,?,1)")
+          .run(user.id, id, f.title || clip(film.title, 120), clip(film.planeName, 80), clip(film.director, 80), clip(film.duration, 40), clip(film.src, 500), now, now);
+        logEvent("buy", user.id, user.email, req.headers);
+      }
+      const passes = (db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id) || {}).passes || 0;
+      send(200, JSON.stringify({ isNew: !existing, passes, owned: ownedList(user.id) }));
+    });
+  }
+  if (p === "/api/passes" && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    const row = db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id);
+    const ledger = db.prepare("SELECT delta, reason, at AS created_at FROM pass_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20").all(user.id);
+    const owned = db.prepare("SELECT film_id FROM owned WHERE user_id = ?").all(user.id).map((r) => r.film_id);
+    return send(200, JSON.stringify({ passes: (row && row.passes) || 0, owned, ledger }));
+  }
+  if (p === "/api/passes/recharge" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const pack = PASS_PACKS[body.pack];
+      if (!pack) return send(400, JSON.stringify({ error: "unknown pack", packs: Object.keys(PASS_PACKS) }));
+      // 支付通道未接：加卡只允许管理员（旧本地版免费充值是权限漏洞，已封）
+      if (!user.is_admin && !adminCookieOk(req.headers)) return send(402, JSON.stringify({ error: "payment_required", packs: Object.keys(PASS_PACKS) }));
+      db.prepare("UPDATE users SET passes = COALESCE(passes,0) + ? WHERE id = ?").run(pack.n, user.id);
+      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, pack.n, `充值 · ${pack.label}`, nowStr());
+      const row = db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id);
+      send(200, JSON.stringify({ passes: row.passes, added: pack.n, label: pack.label }));
+    });
+  }
+  // 游戏内消耗（观测/私语/按摩…）：带 key 幂等扣费；同 key 可退一次，杜绝客户端无限退款
+  if (p === "/api/passes/spend" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const amount = Math.max(1, Math.min(999, Math.round(Number(body.amount) || 1)));
+      const key = String(body.key || "").slice(0, 80);
+      if (!key) return send(400, JSON.stringify({ error: "key required" }));
+      const prior = db.prepare("SELECT * FROM pass_spends WHERE key = ?").get(key);
+      const bal = (db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id) || {}).passes || 0;
+      if (prior) {
+        if (prior.user_id !== user.id) return send(409, JSON.stringify({ error: "key collision" }));
+        return send(200, JSON.stringify({ passes: bal, key, deduped: true }));
+      }
+      if (bal < amount) return send(402, JSON.stringify({ error: "insufficient_passes", passes: bal, price: amount }));
+      db.prepare("UPDATE users SET passes = COALESCE(passes,0) - ? WHERE id = ?").run(amount, user.id);
+      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, -amount, String(body.reason || "消费").slice(0, 60), nowStr());
+      db.prepare("INSERT INTO pass_spends (key,user_id,amount,reason,at) VALUES (?,?,?,?,?)").run(key, user.id, amount, String(body.reason || "").slice(0, 60), nowStr());
+      logEvent("spend", user.id, user.email, req.headers);
+      send(200, JSON.stringify({ passes: bal - amount, key }));
+    });
+  }
+  if (p === "/api/passes/refund" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const key = String(body.key || "").slice(0, 80);
+      const s = key ? db.prepare("SELECT * FROM pass_spends WHERE key = ? AND user_id = ?").get(key, user.id) : null;
+      if (!s) return send(404, JSON.stringify({ error: "spend not found" }));
+      if (s.refunded) return send(200, JSON.stringify({ passes: currentPasses(user.id), key, deduped: true }));
+      db.prepare("UPDATE users SET passes = COALESCE(passes,0) + ? WHERE id = ?").run(s.amount, user.id);
+      db.prepare("UPDATE pass_spends SET refunded = 1 WHERE key = ?").run(key);
+      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, s.amount, `退回 · ${s.reason || ""}`.slice(0, 60), nowStr());
+      send(200, JSON.stringify({ passes: currentPasses(user.id), key }));
+    });
+  }
+
+  if (p === "/api/profile" && req.method === "PUT") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const nm = String(body.name || "").trim().slice(0, 24);
+      const gd = String(body.gender || "").trim().slice(0, 4);
+      const lg = String(body.lang || "");
+      const hasLang = ["zh", "en", "ja", "ko"].includes(lg);
+      if (!nm && !hasLang) return send(400, JSON.stringify({ error: "name required" }));
+      if (nm) db.prepare("UPDATE users SET name = ?, gender = ? WHERE id = ?").run(nm, gd, user.id);
+      if (hasLang) db.prepare("UPDATE users SET lang = ? WHERE id = ?").run(lg, user.id);
+      const row = db.prepare("SELECT name, gender, lang FROM users WHERE id = ?").get(user.id);
+      send(200, JSON.stringify({ ok: true, name: row.name, gender: row.gender, lang: row.lang || "zh" }));
+    });
+  }
+  // 价目同步：只允许管理员推 manifest（价目决定扣费，普通客户端不能改）
+  if (p === "/api/admin/manifest" && req.method === "POST") {
+    if (!user || !user.is_admin) {
+      if (!adminCookieOk(req.headers)) return send(403, JSON.stringify({ error: "admin only" }));
+    }
+    return readBody().then(() => {
+      try {
+        const json = JSON.stringify(body);
+        if (!Array.isArray(body.schedules)) return send(400, JSON.stringify({ error: "schedules required" }));
+        fs.writeFileSync(MANIFEST_PATH, json);
+        const n = syncPricesFromManifest();
+        send(200, JSON.stringify({ ok: true, films: n }));
+      } catch (e) { send(500, JSON.stringify({ error: String(e).slice(0, 120) })); }
+    });
   }
 
   // ---- API: game profile (App pushes; portal reads) ----
@@ -592,19 +812,27 @@ http.createServer((req, res) => {
   // ---- portal page ----
   if (p === "/account" && req.method === "GET") return send(200, PORTAL, "text/html; charset=utf-8", { "cache-control": "no-cache" });
 
-  // ---- legacy pass-based admin ----
-  const pass = u.searchParams.get("pass") || ((req.headers.cookie || "").match(/pcadmin=([^;]+)/) || [])[1] || "";
+  // ---- 运营台登录：POST 口令 → 只下发签名 cookie（口令绝不进 URL / 访问日志 / Referer）----
+  const loginErrHtml = (msg) => `<meta http-equiv="refresh" content="1.6"><body style="background:#0d0b08;color:#ff9d8a;font:16px sans-serif;text-align:center;padding-top:40vh">${msg}<script>setTimeout(()=>location.href="/pc-submit/admin",1600)</script>`;
   if (p === "/admin" && req.method === "POST") {
     return formBody((f) => {
-      const pw = f.get("pass");
-      if (pw !== ADMIN_PASS) return send(200, `<meta http-equiv="refresh" content="1.2"><body style="background:#0d0b08;color:#ff9d8a;font:16px sans-serif;text-align:center;padding-top:40vh">口令不对，请重试<script>setTimeout(()=>location.href="/pc-submit/admin",1200)</script>`, "text/html");
-      res.writeHead(302, { location: "/pc-submit/admin?pass=" + encodeURIComponent(ADMIN_PASS), "set-cookie": ADMIN_COOKIE(pw) });
+      const pw = String(f.get("pass") || "");
+      const key = "admin:" + clientIp(req.headers);
+      if (tooManyFails(key)) return send(429, loginErrHtml("尝试过于频繁，请十分钟后再试"), "text/html; charset=utf-8");
+      if (!safeEq(pw, ADMIN_PASS)) { noteFail(key); return send(200, loginErrHtml("口令不对，请重试"), "text/html; charset=utf-8"); }
+      clearFails(key);
+      logEvent("admin", null, "运营台口令登录", req.headers);
+      res.writeHead(302, { location: "/pc-submit/admin", "set-cookie": ADMIN_COOKIE() });
       res.end();
     });
   }
+  if (p === "/admin/logout") {
+    res.writeHead(302, { location: "/pc-submit/admin", "set-cookie": "pcadmin=; Path=/; Domain=.osmaigc.com; Max-Age=0; Secure; HttpOnly" });
+    return res.end();
+  }
   if (p.startsWith("/admin")) {
-    if (pass !== ADMIN_PASS && !(user && user.is_admin)) {
-      return send(200, `<!doctype html><html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>投稿后台</title><body style="background:#0d0b08;color:#f4f0e6;font:16px sans-serif;display:grid;place-items:center;height:100vh"><form method="post" action="/pc-submit/admin" style="text-align:center"><p style="letter-spacing:.2em;color:#d4af6a">平行世界 · 投稿后台</p><input name="pass" type="password" placeholder="管理口令" style="background:transparent;border:1px solid #d4af6a;border-radius:8px;padding:10px 16px;color:#f4f0e6;font-size:16px"><button style="margin-left:8px;padding:10px 20px;background:#d4af6a;border:0;border-radius:8px;font-size:15px">进入</button></form></body></html>`, "text/html");
+    if (!adminCookieOk(req.headers) && !(user && user.is_admin)) {
+      return send(200, `<!doctype html><html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>运营台</title><body style="background:#0d0b08;color:#f4f0e6;font:16px sans-serif;display:grid;place-items:center;height:100vh"><form method="post" action="/pc-submit/admin" style="text-align:center"><p style="letter-spacing:.2em;color:#d4af6a">平行世界 · 运营台</p><input name="pass" type="password" autocomplete="current-password" placeholder="管理口令" style="background:transparent;border:1px solid #d4af6a;border-radius:8px;padding:10px 16px;color:#f4f0e6;font-size:16px"><button style="margin-left:8px;padding:10px 20px;background:#d4af6a;border:0;border-radius:8px;font-size:15px">进入</button></form></body></html>`, "text/html; charset=utf-8", { "cache-control": "no-store" });
     }
     if (p === "/admin/set") {
       const id = Number(u.searchParams.get("id"));
@@ -612,12 +840,12 @@ http.createServer((req, res) => {
         const status = ST[f.get("status")] ? f.get("status") : "received";
         const reply = String(f.get("reply") || "").slice(0, 1000);
         db.prepare("UPDATE submissions SET status = ?, reply = ? WHERE id = ?").run(status, reply, id);
-        res.writeHead(302, { location: "/pc-submit/admin?pass=" + encodeURIComponent(ADMIN_PASS) });
+        res.writeHead(302, { location: "/pc-submit/admin" });
         return res.end();
       });
     }
     const rows = db.prepare("SELECT * FROM submissions ORDER BY id DESC").all();
-    return send(200, adminPage(rows, obsData()), "text/html; charset=utf-8");
+    return send(200, adminPage(rows, obsData()), "text/html; charset=utf-8", { "cache-control": "no-store" });
   }
 
   // default: anonymous intake (legacy path used by creators.html)
