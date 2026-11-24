@@ -103,6 +103,10 @@ try {
 // ── 云端主权层：账号资产（通行证 / 已购片 / 档案）──
 // 口径：核心数据只在这里，客户端(桌面 App / 网页)只做缓存镜像。
 ensureCol("users", "passes", "INTEGER DEFAULT 0");
+// 双通证：绿通 green=创作者侧(Matrix 线,促销期) / 金通 gold=玩家侧(游戏线)。消费等价,绿通不计票房
+ensureCol("users", "passes_green", "INTEGER DEFAULT 0");
+ensureCol("users", "passes_gold", "INTEGER DEFAULT 0");
+ensureCol("users", "compute_balance", "INTEGER DEFAULT 0");
 ensureCol("users", "name", "TEXT DEFAULT ''");
 ensureCol("users", "gender", "TEXT DEFAULT ''");
 ensureCol("users", "lang", "TEXT DEFAULT 'zh'");
@@ -156,6 +160,30 @@ db.exec(`CREATE TABLE IF NOT EXISTS pass_spends (
   amount INTEGER NOT NULL,
   reason TEXT DEFAULT '',
   refunded INTEGER DEFAULT 0,
+  spend_json TEXT DEFAULT '',
+  at TEXT DEFAULT (datetime('now'))
+)`);
+// 通证批次账本：判据不是币种,是「这张票背后有没有真钱」→ unit_cash
+db.exec(`CREATE TABLE IF NOT EXISTS pass_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'gold',
+  qty INTEGER NOT NULL,
+  remaining INTEGER NOT NULL,
+  unit_cash REAL NOT NULL DEFAULT 0,
+  source TEXT DEFAULT '',
+  reason TEXT DEFAULT '',
+  expires_at TEXT,
+  at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_batch_uid ON pass_batches (user_id, remaining, expires_at)");
+ensureCol("pass_spends", "spend_json", "TEXT DEFAULT ''");
+db.exec(`CREATE TABLE IF NOT EXISTS compute_credits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  delta INTEGER NOT NULL,
+  reason TEXT DEFAULT '',
+  source TEXT DEFAULT '',
   at TEXT DEFAULT (datetime('now'))
 )`);
 // ---- 剧场经济与社交：与账号同等口径，核心数据只在云端 ----
@@ -174,6 +202,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS show_tickets (
   price INTEGER NOT NULL, spend_key TEXT, at TEXT DEFAULT (datetime('now'))
 )`);
 try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_ticket_key ON show_tickets(spend_key)"); } catch {}
+ensureCol("show_tickets", "paid_kind", "TEXT DEFAULT 'gold'");
+ensureCol("show_tickets", "cash_backed", "REAL DEFAULT 0");
+ensureCol("show_tickets", "self_buy", "INTEGER DEFAULT 0");
 db.exec(`CREATE TABLE IF NOT EXISTS show_payouts (
   show_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
   cum INTEGER DEFAULT 0, paid INTEGER DEFAULT 0, carry INTEGER DEFAULT 0, last_day TEXT
@@ -223,14 +254,94 @@ const ownedList = (uid) => db.prepare("SELECT * FROM owned WHERE user_id = ? ORD
   .map((r) => ({ id: r.film_id, title: r.title, planeName: r.plane_name, director: r.director, duration: r.duration, src: r.src, firstWatched: r.first_watched, lastWatched: r.last_watched, watchCount: r.watch_count }));
 const nowStr = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 19).replace("T", " ");
 const currentPasses = (uid) => (db.prepare("SELECT passes FROM users WHERE id = ?").get(uid) || {}).passes || 0;
+// ── 通证账本（服务端唯一真源）──────────────────────────────
+const PASS_WORD = { green: "绿通", gold: "金通" };
+const bjDate = (offsetDays = 0) => new Date(Date.now() + 8 * 3600e3 + offsetDays * 86400e3).toISOString().slice(0, 10);
+const passBalances = (uid) => {
+  // 过期批次不计入余额（读时即视作失效,写时再物理清零）
+  const r = db.prepare(`SELECT COALESCE(SUM(CASE WHEN kind='green' THEN remaining ELSE 0 END),0) AS green,
+    COALESCE(SUM(CASE WHEN kind='gold' THEN remaining ELSE 0 END),0) AS gold
+    FROM pass_batches WHERE user_id = ? AND (expires_at IS NULL OR expires_at >= ?)`).get(uid, bjDate(0)) || { green: 0, gold: 0 };
+  return { green: r.green | 0, gold: r.gold | 0, total: (r.green | 0) + (r.gold | 0) };
+};
+function syncPassTotals(uid) {
+  const b = passBalances(uid);
+  db.prepare("UPDATE users SET passes = ?, passes_green = ?, passes_gold = ? WHERE id = ?").run(b.total, b.green, b.gold, uid);
+  return b;
+}
+function creditPasses(uid, qty, opt = {}) {
+  const n = Math.round(Number(qty) || 0);
+  if (!(n > 0)) return passBalances(uid);
+  const kind = opt.kind === "green" ? "green" : "gold";
+  const unitCash = Math.max(0, Number(opt.unitCash) || 0);
+  const exp = Number(opt.days) > 0 ? bjDate(Number(opt.days)) : null;
+  db.prepare(`INSERT INTO pass_batches (user_id, kind, qty, remaining, unit_cash, source, reason, expires_at, at)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(uid, kind, n, n, unitCash, String(opt.source || ""), String(opt.reason || "").slice(0, 80), exp, nowStr());
+  db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)")
+    .run(uid, n, `${PASS_WORD[kind]}+${n} · ${String(opt.reason || "入账").slice(0, 60)}`, nowStr());
+  return syncPassTotals(uid);
+}
+// FIFO：先到期先花;同到期日绿通先花（过期作废对用户最不利的排前面）
+function debitPasses(uid, qty, reason) {
+  const n = Math.round(Number(qty) || 0);
+  if (!(n > 0)) return { ...passBalances(uid), cash_backed: 0, used: [] };
+  db.prepare("UPDATE pass_batches SET remaining = 0 WHERE user_id = ? AND remaining > 0 AND expires_at IS NOT NULL AND expires_at < ?").run(uid, bjDate(0));
+  let need = n, cash = 0;
+  const used = [];
+  for (const b of db.prepare(`SELECT * FROM pass_batches WHERE user_id = ? AND remaining > 0
+      ORDER BY (expires_at IS NULL), expires_at, CASE kind WHEN 'green' THEN 0 ELSE 1 END, id`).all(uid)) {
+    if (need <= 0) break;
+    const take = Math.min(need, b.remaining | 0);
+    if (take <= 0) continue;
+    db.prepare("UPDATE pass_batches SET remaining = remaining - ? WHERE id = ?").run(take, b.id);
+    need -= take;
+    cash += take * (Number(b.unit_cash) || 0);
+    const u = used.find((x) => x.kind === b.kind && x.unit_cash === (Number(b.unit_cash) || 0));
+    if (u) u.n += take; else used.push({ kind: b.kind, n: take, unit_cash: Number(b.unit_cash) || 0 });
+  }
+  if (need > 0) return null; // 余额不足
+  db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, -n, String(reason).slice(0, 120), nowStr());
+  const b = syncPassTotals(uid);
+  return { ...b, cash_backed: cash, used };
+}
+function creditCompute(uid, qty, reason, source = "promo") {
+  const n = Math.round(Number(qty) || 0);
+  if (!(n > 0)) return 0;
+  db.prepare("UPDATE users SET compute_balance = COALESCE(compute_balance, 0) + ? WHERE id = ?").run(n, uid);
+  db.prepare("INSERT INTO compute_credits (user_id, delta, reason, source, at) VALUES (?,?,?,?,?)")
+    .run(uid, n, String(reason || "").slice(0, 80), String(source || ""), nowStr());
+  return n;
+}
+// 一次性迁移：历史 passes 余额 → gold 批次（unit_cash=0，老礼包与补发都不是真钱,不计票房）
+if (!db.prepare("SELECT 1 AS x FROM meta WHERE k = ?").get("pass_batches_init")) {
+  let moved = 0;
+  for (const u of db.prepare("SELECT id, COALESCE(passes,0) AS p FROM users").all()) {
+    const has = db.prepare("SELECT COUNT(*) AS c FROM pass_batches WHERE user_id = ?").get(u.id).c;
+    if (!has && u.p > 0) { creditPasses(u.id, u.p, { kind: "gold", unitCash: 0, source: "legacy", reason: "历史存量迁移" }); moved++; }
+    syncPassTotals(u.id);
+  }
+  db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)").run("pass_batches_init", String(moved));
+  console.log("pass_batches init:", moved);
+}
 // 股东票房日结（服务端唯一）：票价1通证/张；每日应付 = floor((未结票房+滚存)/2)，余数滚存次日
 const localDayStr = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+// ── 促销期（只发生在发行端;消费端面值不动）──
+// 促销期：Matrix 用户充绿通送算力 / 游戏玩家充金通送金通。非促销期：绿通停发、金通不送。
+const PROMO = {
+  on: String(process.env.PROMO_ON ?? "1") === "1",
+  ends: process.env.PROMO_ENDS || "2027-03-31",
+  greenDays: Number(process.env.PASS_GREEN_DAYS || 90),
+  greenCompute: Number(process.env.PROMO_GREEN_COMPUTE || 1),
+  goldBonus: Number(process.env.PROMO_GOLD_BONUS || 1),
+};
+const promoActive = () => PROMO.on && localDayStr() <= PROMO.ends;
 function settleShowPayouts(day = localDayStr()) {
   const rows = db.prepare(`SELECT p.show_id, p.user_id, p.cum, p.paid, p.carry, s.title
     FROM show_payouts p JOIN shows s ON s.id = p.show_id
     WHERE p.last_day IS NULL OR p.last_day < ?`).all(day);
   for (const r of rows) {
-    const sold = db.prepare("SELECT COALESCE(SUM(price),0) AS gross FROM show_tickets WHERE show_id = ?").get(r.show_id) || { gross: 0 };
+    // 分成基数 = 现金背书票房 SUM(cash_backed)：赠票/绿通 0 贡献，真钱票全额入账
+    const sold = db.prepare("SELECT COALESCE(SUM(COALESCE(cash_backed,0)),0) AS gross FROM show_tickets WHERE show_id = ?").get(r.show_id) || { gross: 0 };
     if (r.last_day === null) { // 开账日只立基线，跨日后首次支付
       db.prepare("UPDATE show_payouts SET cum = ?, last_day = ? WHERE show_id = ?").run(sold.gross, day, r.show_id);
       continue;
@@ -241,9 +352,8 @@ function settleShowPayouts(day = localDayStr()) {
     db.prepare("UPDATE show_payouts SET cum = ?, paid = paid + ?, carry = ?, last_day = ? WHERE show_id = ?")
       .run(sold.gross, pay, carry, day, r.show_id);
     if (pay > 0) {
-      db.prepare("UPDATE users SET passes = COALESCE(passes,0) + ? WHERE id = ?").run(pay, r.user_id);
-      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)")
-        .run(r.user_id, pay, `小靡专场票房分成 ·《${r.title}》(${r.last_day || "开账"}→${day})`, nowStr());
+      creditPasses(r.user_id, pay, { kind: "gold", unitCash: 1, source: "payout",
+        reason: `小靡专场票房分成 ·《${r.title}》(${r.last_day || "开账"}→${day})` });
     }
   }
   return rows.length;
@@ -256,6 +366,7 @@ const stageList = () => db.prepare(`SELECT s.id, s.theme, s.title, s.script, s.f
     s.user_id AS owner_id, COALESCE(u.name, '') AS owner_name,
     (SELECT COUNT(*) FROM show_tickets t WHERE t.show_id = s.id) AS tickets_sold,
     (SELECT COALESCE(SUM(t.price),0) FROM show_tickets t WHERE t.show_id = s.id) AS gross,
+    (SELECT COALESCE(SUM(COALESCE(t.cash_backed,0)),0) FROM show_tickets t WHERE t.show_id = s.id) AS cash_gross,
     COALESCE(p.paid,0) AS paid_out, COALESCE(p.carry,0) AS carry
   FROM shows s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN show_payouts p ON p.show_id = s.id
   WHERE s.shareholder = 1 ORDER BY s.pinned DESC, s.id DESC LIMIT 50`).all();
@@ -307,7 +418,7 @@ const ST = { received: ["已收到", "#d4af6a"], reviewing: ["审核中", "#9ef0
 
 const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 const clip = (s, n) => String(s ?? "").trim().slice(0, n);
-const pubUser = (u) => ({ id: u.id, email: u.email, name: u.name || "", isAdmin: !!u.is_admin, created_at: u.created_at, lang: u.lang || "zh", passes: u.passes || 0, emailVerified: !!u.email_verified });
+const pubUser = (u) => ({ id: u.id, email: u.email, name: u.name || "", isAdmin: !!u.is_admin, created_at: u.created_at, lang: u.lang || "zh", passes: u.passes || 0, green: u.passes_green || 0, gold: u.passes_gold || 0, compute: u.compute_balance || 0, emailVerified: !!u.email_verified });
 
 function userByReq(headers) {
   const token = String(headers.authorization || "").replace("Bearer ", "")
@@ -452,10 +563,10 @@ async function issueVerifyMail(uid, email, ip) {
 }
 
 function grantVerifyBonus(uid) {
-  const done = db.prepare("SELECT 1 AS x FROM pass_ledger WHERE user_id = ? AND reason = ?").get(uid, "邮箱验证赠送");
+  const done = db.prepare("SELECT 1 AS x FROM pass_ledger WHERE user_id = ? AND reason LIKE ?").get(uid, "%邮箱验证赠送%");
   if (done) return { granted: 0 };
-  db.prepare("UPDATE users SET passes = COALESCE(passes, 0) + ? WHERE id = ?").run(SIGNUP_BONUS, uid);
-  db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, SIGNUP_BONUS, "邮箱验证赠送", nowStr());
+  // 礼包发金通但 unit_cash=0：能看片、不产生票房分成 → 刷号套利收益归零
+  creditPasses(uid, SIGNUP_BONUS, { kind: "gold", unitCash: 0, source: "signup", reason: "邮箱验证赠送" });
   return { granted: SIGNUP_BONUS };
 }
 
@@ -477,6 +588,9 @@ function obsData() {
       (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND COALESCE(s.revoked,0) = 0) AS live,
       (SELECT COUNT(*) FROM login_events e WHERE e.user_id = u.id AND e.kind = 'login') AS logins,
       (SELECT COUNT(*) FROM submissions b WHERE b.user_id = u.id) AS subs,
+      (SELECT COALESCE(SUM(remaining),0) FROM pass_batches b WHERE b.user_id = u.id AND b.kind='green' AND (b.expires_at IS NULL OR b.expires_at >= date('now','+8 hours'))) AS green,
+      (SELECT COALESCE(SUM(remaining),0) FROM pass_batches b WHERE b.user_id = u.id AND b.kind='gold') AS gold,
+      COALESCE(u.compute_balance,0) AS compute,
       (SELECT MAX(last_seen) FROM sessions s WHERE s.user_id = u.id) AS seen
     FROM users u ORDER BY COALESCE(u.last_login, u.created_at) DESC`).all();
   const events = db.prepare("SELECT * FROM login_events ORDER BY id DESC LIMIT 80").all();
@@ -491,6 +605,11 @@ function obsData() {
     online: one("SELECT COUNT(DISTINCT user_id) c FROM sessions WHERE COALESCE(revoked,0) = 0 AND last_seen >= datetime('now','-30 minutes')"),
     fails: one("SELECT COUNT(*) c FROM login_events WHERE kind = 'fail' AND at >= datetime('now','-1 day')"),
     subs: one("SELECT COUNT(*) c FROM submissions"),
+    green: one("SELECT COALESCE(SUM(remaining),0) c FROM pass_batches WHERE kind='green' AND (expires_at IS NULL OR expires_at >= date('now','+8 hours'))"),
+    gold: one("SELECT COALESCE(SUM(remaining),0) c FROM pass_batches WHERE kind='gold'"),
+    greenIssued: one("SELECT COALESCE(SUM(qty),0) c FROM pass_batches WHERE kind='green'"),
+    compute: one("SELECT COALESCE(SUM(COALESCE(compute_balance,0)),0) c FROM users"),
+    cashBox: one("SELECT COALESCE(SUM(COALESCE(cash_backed,0)),0) c FROM show_tickets"),
   };
   return { users, events, stats };
 }
@@ -794,20 +913,21 @@ function paintObs(){
   }
   var j = obsCache, s = j.stats || {};
   if (admSel === 'ov') {
-    var cells = [['注册用户', s.users], ['此刻在线', s.online], ['今日登录', s.loginsToday], ['7 日活跃', s.active7], ['24h 失败登录', s.fails], ['投稿总数', s.subs]];
+    var cells = [['注册用户', s.users], ['此刻在线', s.online], ['今日登录', s.loginsToday], ['7 日活跃', s.active7], ['24h 失败登录', s.fails], ['投稿总数', s.subs],
+      ['绿通在库', s.green], ['金通在库', s.gold], ['绿通累计发行', s.greenIssued], ['算力负债', s.compute], ['现金背书票房', s.cashBox]];
     box.innerHTML = '<div class="ostat">' + cells.map(function(c){ return '<div><b>' + (c[1] == null ? '—' : c[1]) + '</b><span>' + c[0] + '</span></div>'; }).join('') + '</div>'
       + '<p class="meta" style="text-align:center;margin:2px 0 0">数据实时取自服务器 · ' + esc(new Date().toLocaleString('zh-CN')) + '</p>';
   } else if (admSel === 'us') {
     var us = j.users || [];
-    box.innerHTML = '<div class="otbl"><table><thead><tr><th>#</th><th>账号</th><th>邮箱</th><th>注册</th><th>最后登录</th><th>次数</th><th>最后 IP</th><th>投稿</th><th>在线</th></tr></thead><tbody>'
+    box.innerHTML = '<div class="otbl"><table><thead><tr><th>#</th><th>账号</th><th>邮箱</th><th>注册</th><th>最后登录</th><th>次数</th><th>最后 IP</th><th>投稿</th><th>通证(绿/金)</th><th>在线</th></tr></thead><tbody>'
       + us.map(function(u){
         var live = u.live && u.seen && (Date.now() - new Date(String(u.seen).replace(' ', 'T') + 'Z').getTime() < 1800e3);
         return '<tr><td>' + u.id + '</td><td>' + esc(u.email) + (u.is_admin ? ' <i class="tg">管理</i>' : '') + '</td>'
           + '<td>' + (u.verified ? '<i class="tg ok">已验证</i>' : '<i class="tg wn">未验证</i>') + '</td>'
           + '<td>' + esc(u.created_at || '—') + '</td><td>' + esc(u.last_login || '—') + '</td><td>' + (u.logins || 0) + '</td>'
           + '<td>' + esc(u.last_ip || '—') + (u.ip_accounts > 1 ? ' <i class="tg wn">同IP×' + u.ip_accounts + '</i>' : '') + '</td>'
-          + '<td>' + (u.subs || 0) + '</td><td>' + (live ? '● 在馆' : '—') + '</td></tr>';
-      }).join('') + (us.length ? '' : '<tr><td colspan="9" style="text-align:center;color:var(--dim)">还没有注册用户</td></tr>') + '</tbody></table></div>';
+          + '<td>' + (u.subs || 0) + '</td><td style="white-space:nowrap">' + (u.green || 0) + ' / ' + (u.gold || 0) + '</td><td>' + (live ? '● 在馆' : '—') + '</td></tr>';
+      }).join('') + (us.length ? '' : '<tr><td colspan="10" style="text-align:center;color:var(--dim)">还没有注册用户</td></tr>') + '</tbody></table></div>';
   } else {
     var K = { login: '登录', register: '注册', logout: '退出', fail: '失败登录', buy: '买断', spend: '消费', refund: '退款', admin: '管理登录', verify: '邮箱验证' };
     var ev = j.events || [];
@@ -946,7 +1066,7 @@ http.createServer((req, res) => {
       const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin, passes, email_verified, signup_ip) VALUES (?, ?, ?, ?, ?, ?)")
         .run(email, hashPass(password), isAdmin, bonusNow, REQUIRE_VERIFY ? 0 : 1, ip);
       const uid = Number(info.lastInsertRowid);
-      if (bonusNow) db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, bonusNow, "注册赠送", nowStr());
+      if (bonusNow) creditPasses(uid, bonusNow, { kind: "gold", unitCash: 0, source: "signup", reason: "注册赠送" });
       const token = crypto.randomBytes(32).toString("hex");
       db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, uid, ip, clientUa(req.headers));
       db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, uid);
@@ -1045,26 +1165,39 @@ http.createServer((req, res) => {
           .run(now, String(clip(film.src, 500)), user.id, id);
       } else {
         const price = f.price | 0;
-        const bal = (db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id) || {}).passes || 0;
-        if (bal < price) return send(402, JSON.stringify({ error: "insufficient_passes", passes: bal, price }));
+        const b0 = passBalances(user.id);
+        if (b0.total < price) return send(402, JSON.stringify({ error: "insufficient_passes", passes: b0.total, price, green: b0.green, gold: b0.gold }));
         if (price > 0) {
-          db.prepare("UPDATE users SET passes = COALESCE(passes,0) - ? WHERE id = ?").run(price, user.id);
-          db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, -price, `买断《${f.title || id}》`, now);
+          const spent = debitPasses(user.id, price, `买断《${f.title || id}》`);
+          if (!spent) return send(402, JSON.stringify({ error: "insufficient_passes", passes: passBalances(user.id).total, price }));
         }
         db.prepare("INSERT INTO owned (user_id,film_id,title,plane_name,director,duration,src,first_watched,last_watched,watch_count) VALUES (?,?,?,?,?,?,?,?,?,1)")
           .run(user.id, id, f.title || clip(film.title, 120), clip(film.planeName, 80), clip(film.director, 80), clip(film.duration, 40), clip(film.src, 500), now, now);
         logEvent("buy", user.id, user.email, req.headers);
       }
-      const passes = (db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id) || {}).passes || 0;
-      send(200, JSON.stringify({ isNew: !existing, passes, owned: ownedList(user.id) }));
+      const bb = passBalances(user.id);
+      send(200, JSON.stringify({ isNew: !existing, passes: bb.total, green: bb.green, gold: bb.gold, owned: ownedList(user.id) }));
     });
   }
   if (p === "/api/passes" && req.method === "GET") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
-    const row = db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id);
+    const b = passBalances(user.id);
     const ledger = db.prepare("SELECT delta, reason, at AS created_at FROM pass_ledger WHERE user_id = ? ORDER BY id DESC LIMIT 20").all(user.id);
     const owned = db.prepare("SELECT film_id FROM owned WHERE user_id = ?").all(user.id).map((r) => r.film_id);
-    return send(200, JSON.stringify({ passes: (row && row.passes) || 0, owned, ledger }));
+    const me = db.prepare("SELECT compute_balance FROM users WHERE id = ?").get(user.id) || {};
+    return send(200, JSON.stringify({ passes: b.total, green: b.green, gold: b.gold, owned, ledger,
+      compute: me.compute_balance || 0, promo: promoActive(), promo_ends: PROMO.ends, green_days: PROMO.greenDays }));
+  }
+  if (p === "/api/compute" && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    const me = db.prepare("SELECT compute_balance FROM users WHERE id = ?").get(user.id) || {};
+    const ledger = db.prepare("SELECT delta, reason, source, at AS created_at FROM compute_credits WHERE user_id = ? ORDER BY id DESC LIMIT 20").all(user.id);
+    return send(200, JSON.stringify({ compute: me.compute_balance || 0, ledger, promo: promoActive(), promo_ends: PROMO.ends }));
+  }
+  if (p === "/api/promo" && req.method === "GET") {
+    return send(200, JSON.stringify({ promo: promoActive(), ends: PROMO.ends,
+      green_days: PROMO.greenDays, green_compute_rate: PROMO.greenCompute, gold_bonus_rate: PROMO.goldBonus,
+      note: "促销期：Matrix 线充绿通送算力；游戏线充金通送金通。绿通不计票房，促销结束停发。" }));
   }
   if (p === "/api/passes/recharge" && req.method === "POST") {
     if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
@@ -1073,10 +1206,23 @@ http.createServer((req, res) => {
       if (!pack) return send(400, JSON.stringify({ error: "unknown pack", packs: Object.keys(PASS_PACKS) }));
       // 支付通道未接：加卡只允许管理员（旧本地版免费充值是权限漏洞，已封）
       if (!user.is_admin && !adminCookieOk(req.headers)) return send(402, JSON.stringify({ error: "payment_required", packs: Object.keys(PASS_PACKS) }));
-      db.prepare("UPDATE users SET passes = COALESCE(passes,0) + ? WHERE id = ?").run(pack.n, user.id);
-      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, pack.n, `充值 · ${pack.label}`, nowStr());
-      const row = db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id);
-      send(200, JSON.stringify({ passes: row.passes, added: pack.n, label: pack.label }));
+      // kind=green 走 Matrix 线（创作者侧，计 90 天有效期、永不计票房）；kind=gold 走游戏线（玩家侧）
+      const kind = body.kind === "green" ? "green" : "gold";
+      if (kind === "green" && !promoActive()) return send(403, JSON.stringify({ error: "green_retired", hint: "促销期已结束，绿通停止发行；请使用金通" }));
+      creditPasses(user.id, pack.n, { kind, unitCash: kind === "green" ? 0 : 1,
+        source: kind === "green" ? "matrix" : "game", reason: `充值 · ${pack.label}`,
+        days: kind === "green" ? PROMO.greenDays : 0 });
+      let bonus = 0, compute = 0;
+      if (promoActive()) {
+        if (kind === "green") { compute = creditCompute(user.id, Math.round(pack.n * PROMO.greenCompute), "促销 · 充绿通送算力", "promo"); }
+        else {
+          bonus = Math.round(pack.n * PROMO.goldBonus);
+          if (bonus > 0) creditPasses(user.id, bonus, { kind: "gold", unitCash: 0, source: "promo_bonus", reason: "促销 · 充金送金" });
+        }
+      }
+      const t = passBalances(user.id);
+      send(200, JSON.stringify({ passes: t.total, green: t.green, gold: t.gold, added: pack.n, kind,
+        bonus: bonus || 0, compute: compute || 0, promo: promoActive(), label: pack.label }));
     });
   }
   // 游戏内消耗（观测/私语/按摩…）：带 key 幂等扣费；同 key 可退一次，杜绝客户端无限退款
@@ -1088,17 +1234,18 @@ http.createServer((req, res) => {
       const key = String(body.key || "").slice(0, 80);
       if (!key) return send(400, JSON.stringify({ error: "key required" }));
       const prior = db.prepare("SELECT * FROM pass_spends WHERE key = ?").get(key);
-      const bal = (db.prepare("SELECT passes FROM users WHERE id = ?").get(user.id) || {}).passes || 0;
+      const b0 = passBalances(user.id);
       if (prior) {
         if (prior.user_id !== user.id) return send(409, JSON.stringify({ error: "key collision" }));
-        return send(200, JSON.stringify({ passes: bal, key, deduped: true }));
+        return send(200, JSON.stringify({ passes: b0.total, green: b0.green, gold: b0.gold, key, deduped: true }));
       }
-      if (bal < amount) return send(402, JSON.stringify({ error: "insufficient_passes", passes: bal, price: amount }));
-      db.prepare("UPDATE users SET passes = COALESCE(passes,0) - ? WHERE id = ?").run(amount, user.id);
-      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, -amount, String(body.reason || "消费").slice(0, 60), nowStr());
-      db.prepare("INSERT INTO pass_spends (key,user_id,amount,reason,at) VALUES (?,?,?,?,?)").run(key, user.id, amount, String(body.reason || "").slice(0, 60), nowStr());
+      if (b0.total < amount) return send(402, JSON.stringify({ error: "insufficient_passes", passes: b0.total, price: amount, green: b0.green, gold: b0.gold }));
+      const spent = debitPasses(user.id, amount, String(body.reason || "消费"));
+      if (!spent) return send(402, JSON.stringify({ error: "insufficient_passes", passes: passBalances(user.id).total, price: amount }));
+      db.prepare("INSERT INTO pass_spends (key,user_id,amount,reason,spend_json,at) VALUES (?,?,?,?,?,?)")
+        .run(key, user.id, amount, String(body.reason || "").slice(0, 60), JSON.stringify(spent.used || []), nowStr());
       logEvent("spend", user.id, user.email, req.headers);
-      send(200, JSON.stringify({ passes: bal - amount, key }));
+      send(200, JSON.stringify({ passes: spent.total, green: spent.green, gold: spent.gold, key }));
     });
   }
   if (p === "/api/passes/refund" && req.method === "POST") {
@@ -1108,9 +1255,13 @@ http.createServer((req, res) => {
       const s = key ? db.prepare("SELECT * FROM pass_spends WHERE key = ? AND user_id = ?").get(key, user.id) : null;
       if (!s) return send(404, JSON.stringify({ error: "spend not found" }));
       if (s.refunded) return send(200, JSON.stringify({ passes: currentPasses(user.id), key, deduped: true }));
-      db.prepare("UPDATE users SET passes = COALESCE(passes,0) + ? WHERE id = ?").run(s.amount, user.id);
+      let back = [];
+      try { back = JSON.parse(s.spend_json || "[]"); } catch { back = []; }
+      if (!back.length) back = [{ kind: "gold", n: s.amount, unit_cash: 0 }];
+      for (const x of back) {
+        creditPasses(user.id, x.n, { kind: x.kind, unitCash: x.unit_cash, source: "refund", reason: `退回 · ${s.reason || ""}` });
+      }
       db.prepare("UPDATE pass_spends SET refunded = 1 WHERE key = ?").run(key);
-      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, s.amount, `退回 · ${s.reason || ""}`.slice(0, 60), nowStr());
       send(200, JSON.stringify({ passes: currentPasses(user.id), key }));
     });
   }
@@ -1201,7 +1352,7 @@ http.createServer((req, res) => {
       const id = Number(body.show_id);
       const key = String(body.key || "").slice(0, 80);
       if (!key) return send(400, JSON.stringify({ error: "key required" }));
-      const show = db.prepare("SELECT id, title FROM shows WHERE id = ? AND shareholder = 1").get(id);
+      const show = db.prepare("SELECT id, title, user_id FROM shows WHERE id = ? AND shareholder = 1").get(id);
       if (!show) return send(404, JSON.stringify({ error: "show not found" }));
       const soldNow = () => (db.prepare("SELECT COUNT(*) AS n FROM show_tickets WHERE show_id = ?").get(id) || { n: 0 }).n;
       const prior = db.prepare("SELECT * FROM show_tickets WHERE spend_key = ?").get(key);
@@ -1210,13 +1361,19 @@ http.createServer((req, res) => {
         return send(200, JSON.stringify({ ok: true, passes: currentPasses(user.id), tickets_sold: soldNow(), deduped: true }));
       }
       settleShowPayouts();
-      const bal = currentPasses(user.id);
-      if (bal < 1) return send(402, JSON.stringify({ error: "insufficient_passes", passes: bal, price: 1 }));
-      db.prepare("UPDATE users SET passes = COALESCE(passes,0) - 1 WHERE id = ?").run(user.id);
-      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, -1, `购买小靡专场门票 #${id}`, nowStr());
-      db.prepare("INSERT INTO show_tickets (show_id, buyer_id, price, spend_key, at) VALUES (?,?,?,?,?)").run(id, user.id, 1, key, nowStr());
+      const b0 = passBalances(user.id);
+      if (b0.total < 1) return send(402, JSON.stringify({ error: "insufficient_passes", passes: b0.total, price: 1, green: b0.green, gold: b0.gold }));
+      const spent = debitPasses(user.id, 1, `购买小靡专场门票 #${id}`);
+      if (!spent) return send(402, JSON.stringify({ error: "insufficient_passes", passes: passBalances(user.id).total, price: 1 }));
+      // 自买不计分成：自己买自己的场，票面记账但现金背书置 0
+      const isSelf = Number(show.user_id) === Number(user.id);
+      const usedKind = (spent.used && spent.used[0] && spent.used[0].kind) || "gold";
+      const cash = isSelf ? 0 : Number(spent.cash_backed || 0);
+      db.prepare("INSERT INTO show_tickets (show_id, buyer_id, price, spend_key, paid_kind, cash_backed, self_buy, at) VALUES (?,?,?,?,?,?,?,?)")
+        .run(id, user.id, 1, key, usedKind, cash, isSelf ? 1 : 0, nowStr());
       logEvent("buy", user.id, user.email, req.headers);
-      send(200, JSON.stringify({ ok: true, passes: bal - 1, tickets_sold: soldNow(), key }));
+      send(200, JSON.stringify({ ok: true, passes: spent.total, green: spent.green, gold: spent.gold,
+        tickets_sold: soldNow(), key, paid_kind: usedKind, cash_backed: cash, self_buy: isSelf }));
     });
   }
 
