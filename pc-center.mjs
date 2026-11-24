@@ -282,24 +282,34 @@ function creditPasses(uid, qty, opt = {}) {
   return syncPassTotals(uid);
 }
 // FIFO：先到期先花;同到期日绿通先花（过期作废对用户最不利的排前面）
-function debitPasses(uid, qty, reason) {
+// 用途闸：绿通是首注礼（白送的），只能看片；打赏/商城只收金通，否则「+tag 无限注册换实物」直接亏钱
+const PASS_PURPOSES = { watch: null, tip: ["gold"], mall: ["gold"] };
+
+function debitPasses(uid, qty, reason, opts = {}) {
   const n = Math.round(Number(qty) || 0);
   if (!(n > 0)) return { ...passBalances(uid), cash_backed: 0, used: [] };
   db.prepare("UPDATE pass_batches SET remaining = 0 WHERE user_id = ? AND remaining > 0 AND expires_at IS NOT NULL AND expires_at < ?").run(uid, bjDate(0));
+  const allow = Array.isArray(opts.kinds) && opts.kinds.length ? new Set(opts.kinds) : null;
+  // 先攒计划再动手：旧版余额不足时已扣批次才 return null，会白扣不记账
+  const plan = [];
   let need = n, cash = 0;
-  const used = [];
   for (const b of db.prepare(`SELECT * FROM pass_batches WHERE user_id = ? AND remaining > 0
       ORDER BY (expires_at IS NULL), expires_at, CASE kind WHEN 'green' THEN 0 ELSE 1 END, id`).all(uid)) {
     if (need <= 0) break;
+    if (allow && !allow.has(b.kind)) continue;
     const take = Math.min(need, b.remaining | 0);
     if (take <= 0) continue;
-    db.prepare("UPDATE pass_batches SET remaining = remaining - ? WHERE id = ?").run(take, b.id);
+    plan.push([b, take]);
     need -= take;
     cash += take * (Number(b.unit_cash) || 0);
+  }
+  if (need > 0) return null; // 余额不足：一个都没动
+  const used = [];
+  for (const [b, take] of plan) {
+    db.prepare("UPDATE pass_batches SET remaining = remaining - ? WHERE id = ? AND remaining >= ?").run(take, b.id, take);
     const u = used.find((x) => x.kind === b.kind && x.unit_cash === (Number(b.unit_cash) || 0));
     if (u) u.n += take; else used.push({ kind: b.kind, n: take, unit_cash: Number(b.unit_cash) || 0 });
   }
-  if (need > 0) return null; // 余额不足
   db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(uid, -n, String(reason).slice(0, 120), nowStr());
   const b = syncPassTotals(uid);
   return { ...b, cash_backed: cash, used };
@@ -1244,6 +1254,7 @@ http.createServer((req, res) => {
       const amount = Math.max(1, Math.min(999, Math.round(Number(body.amount) || 1)));
       const key = String(body.key || "").slice(0, 80);
       if (!key) return send(400, JSON.stringify({ error: "key required" }));
+      const purpose = Object.prototype.hasOwnProperty.call(PASS_PURPOSES, String(body.purpose || "")) ? String(body.purpose) : "watch";
       const prior = db.prepare("SELECT * FROM pass_spends WHERE key = ?").get(key);
       const b0 = passBalances(user.id);
       if (prior) {
@@ -1251,10 +1262,12 @@ http.createServer((req, res) => {
         return send(200, JSON.stringify({ passes: b0.total, green: b0.green, gold: b0.gold, key, deduped: true }));
       }
       if (b0.total < amount) return send(402, JSON.stringify({ error: "insufficient_passes", passes: b0.total, price: amount, green: b0.green, gold: b0.gold }));
-      const spent = debitPasses(user.id, amount, String(body.reason || "消费"));
-      if (!spent) return send(402, JSON.stringify({ error: "insufficient_passes", passes: passBalances(user.id).total, price: amount }));
+      const kinds = PASS_PURPOSES[purpose];
+      const spent = debitPasses(user.id, amount, String(body.reason || "消费"), { kinds });
+      if (!spent) return send(402, JSON.stringify({ error: "insufficient_passes", passes: passBalances(user.id).total, price: amount, purpose,
+        hint: kinds ? "该用途只收金通（首注礼绿通只能看片）" : undefined }));
       db.prepare("INSERT INTO pass_spends (key,user_id,amount,reason,spend_json,at) VALUES (?,?,?,?,?,?)")
-        .run(key, user.id, amount, String(body.reason || "").slice(0, 60), JSON.stringify(spent.used || []), nowStr());
+        .run(key, user.id, amount, `${purpose} · ${String(body.reason || "").slice(0, 52)}`, JSON.stringify(spent.used || []), nowStr());
       logEvent("spend", user.id, user.email, req.headers);
       send(200, JSON.stringify({ passes: spent.total, green: spent.green, gold: spent.gold, key }));
     });

@@ -105,6 +105,22 @@ const call = async (p, opt = {}) => {
   r = await call("/api/passes/refund", { method: "POST", cookie: cB, body: { key: "s1" } });
   ok(r.status === 200 && r.j.passes === 5, `退款回补 → ${r.j.passes}`);
 
+  // 12) 用途闸：绿通（首注礼）只能看片，商城/打赏只收金通
+  ins.run(u2, "green", 5, 5, 0, "signup", "首注礼 · 仅看片", "2099-01-01");
+  db.exec(`UPDATE pass_batches SET remaining=0 WHERE user_id=${u2} AND kind='gold'`); // 只留绿通
+  r = await call("/api/passes/spend", { method: "POST", cookie: cB, body: { amount: 3, key: "m1", purpose: "mall", reason: "商城 · 限量海报" } });
+  const afterMall = (await call("/api/passes", { cookie: cB })).j;
+  ok(r.status === 402 && r.j.purpose === "mall" && afterMall.green === 5 && afterMall.passes === 5,
+     `只剩绿通时商城 402 且不误扣 → ${r.status} total=${afterMall.passes} green=${afterMall.green}`);
+  r = await call("/api/passes/spend", { method: "POST", cookie: cB, body: { amount: 1, key: "m2", purpose: "mall", reason: "商城 · 徽章" } });
+  ok(r.status === 402, `商城单张也不收绿通 → ${r.status}`);
+  db.exec(`UPDATE pass_batches SET remaining=5 WHERE user_id=${u2} AND kind='gold' AND unit_cash=1`);
+  const g0 = (await call("/api/passes", { cookie: cB })).j.gold;
+  r = await call("/api/passes/spend", { method: "POST", cookie: cB, body: { amount: 3, key: "t1", purpose: "tip", reason: "打赏创作者" } });
+  ok(r.status === 200 && r.j.gold === g0 - 3 && r.j.green === 5, `打赏只花金通、绿通不动 → ${JSON.stringify(r.j)} (gold ${g0}→${r.j.gold})`);
+  r = await call("/api/passes/spend", { method: "POST", cookie: cB, body: { amount: 2, key: "w1", purpose: "watch", reason: "看片" } });
+  ok(r.status === 200 && r.j.green === 3, `看片先花绿通 → ${JSON.stringify(r.j)}`);
+
   console.log(out.join("\n"));
   console.log(process.exitCode ? "SMOKE_FAILED" : "SMOKE_OK");
 })().catch((e) => { console.log("ERR", e && e.stack || e); process.exitCode = 1; });
