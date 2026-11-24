@@ -1351,10 +1351,8 @@ http.createServer((req, res) => {
   // ---- API: submissions ----
   if (p === "/api/submissions" && req.method === "POST") {
     const ip = req.headers["x-forwarded-for"] || "unknown";
-    if (!user) {
-      if (last.has(ip) && Date.now() - last.get(ip) < RATE_MS) return send(429, JSON.stringify({ ok: false, err: "slow down" }));
-      last.set(ip, Date.now());
-    }
+    // 投稿必须登录（前端有引导，这里是真正的闸门：匿名一律 401）
+    if (!user) return send(401, JSON.stringify({ ok: false, err: "login required", need_login: true, signup_bonus: SIGNUP_BONUS, signup: "/pc-submit/account#reg" }));
     return readBody().then(() => {
       const rec = {
         at: new Date().toISOString().replace("T", " ").slice(0, 19),

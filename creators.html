@@ -800,6 +800,7 @@ function pwcPickType(t){ var s=document.getElementById('pf-type'); if(s) s.value
       .then(function(r){ return r.json(); })
       .then(function(j){
         if(j&&j.ok){ msg.textContent=L().ok; msg.className='pwc-msg'; f.reset(); }
+        else if(j&&j.need_login){ msg.innerHTML=L().need+' <a href="'+REG+'" class="cyan">'+L().go+'</a>'; msg.className='pwc-msg err'; btn.disabled=false; }
         else { msg.textContent=L().net; msg.className='pwc-msg err'; btn.disabled=false; }
       })
       .catch(function(){ msg.textContent=L().net; msg.className='pwc-msg err'; btn.disabled=false; });
