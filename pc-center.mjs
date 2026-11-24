@@ -27,7 +27,7 @@ const MAIL_PORT = Number(process.env.SMTP_PORT || 465);
 const MAIL_FROM = process.env.MAIL_FROM || process.env.SMTP_USER || "noreply@osmaigc.com";
 const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || "平行世界电影院";
 const VERIFY_TTL_H = Number(process.env.VERIFY_TTL_H || 24);
-const SIGNUP_BONUS = Number(process.env.SIGNUP_BONUS || 10);
+const SIGNUP_BONUS = Number(process.env.SIGNUP_BONUS || 5);
 // REQUIRE_EMAIL_VERIFY=1：注册不发通证，点邮件确认后才发；=0：注册即发（邮件通道未就绪时的过渡态）
 const REQUIRE_VERIFY = String(process.env.REQUIRE_EMAIL_VERIFY || "1") !== "0";
 const RESERVED_TLDS = new Set(["invalid", "test", "local", "localhost", "example", "internal", "lan", "home", "corp", "arpa"]);
