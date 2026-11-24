@@ -113,6 +113,42 @@ db.exec(`CREATE TABLE IF NOT EXISTS pass_spends (
   refunded INTEGER DEFAULT 0,
   at TEXT DEFAULT (datetime('now'))
 )`);
+// ---- 剧场经济与社交：与账号同等口径，核心数据只在云端 ----
+db.exec(`CREATE TABLE IF NOT EXISTS friends (
+  user_id INTEGER NOT NULL, friend_id INTEGER NOT NULL,
+  at TEXT DEFAULT (datetime('now')), PRIMARY KEY (user_id, friend_id)
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS shows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+  theme TEXT DEFAULT '', title TEXT DEFAULT '', script TEXT DEFAULT '',
+  fallback INTEGER DEFAULT 0, shareholder INTEGER DEFAULT 0, pinned INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS show_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, show_id INTEGER NOT NULL, buyer_id INTEGER NOT NULL,
+  price INTEGER NOT NULL, spend_key TEXT, at TEXT DEFAULT (datetime('now'))
+)`);
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_ticket_key ON show_tickets(spend_key)"); } catch {}
+db.exec(`CREATE TABLE IF NOT EXISTS show_payouts (
+  show_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
+  cum INTEGER DEFAULT 0, paid INTEGER DEFAULT 0, carry INTEGER DEFAULT 0, last_day TEXT
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS rooms (
+  id TEXT PRIMARY KEY, film_id TEXT, film_title TEXT DEFAULT '', plane_name TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS room_members (
+  room_id TEXT NOT NULL, user_id INTEGER NOT NULL, name TEXT DEFAULT '',
+  pos REAL DEFAULT 0, playing INTEGER DEFAULT 0, last_seen TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (room_id, user_id)
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS whispers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL, user_id INTEGER NOT NULL,
+  name TEXT DEFAULT '', text TEXT DEFAULT '', at INTEGER
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS user_saves (
+  user_id INTEGER PRIMARY KEY, data TEXT DEFAULT '{}', updated_at TEXT DEFAULT (datetime('now'))
+)`);
 db.exec(`CREATE TABLE IF NOT EXISTS films (
   id TEXT PRIMARY KEY,
   title TEXT DEFAULT '',
@@ -142,6 +178,42 @@ const ownedList = (uid) => db.prepare("SELECT * FROM owned WHERE user_id = ? ORD
   .map((r) => ({ id: r.film_id, title: r.title, planeName: r.plane_name, director: r.director, duration: r.duration, src: r.src, firstWatched: r.first_watched, lastWatched: r.last_watched, watchCount: r.watch_count }));
 const nowStr = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 19).replace("T", " ");
 const currentPasses = (uid) => (db.prepare("SELECT passes FROM users WHERE id = ?").get(uid) || {}).passes || 0;
+// 股东票房日结（服务端唯一）：票价1通证/张；每日应付 = floor((未结票房+滚存)/2)，余数滚存次日
+const localDayStr = () => new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+function settleShowPayouts(day = localDayStr()) {
+  const rows = db.prepare(`SELECT p.show_id, p.user_id, p.cum, p.paid, p.carry, s.title
+    FROM show_payouts p JOIN shows s ON s.id = p.show_id
+    WHERE p.last_day IS NULL OR p.last_day < ?`).all(day);
+  for (const r of rows) {
+    const sold = db.prepare("SELECT COALESCE(SUM(price),0) AS gross FROM show_tickets WHERE show_id = ?").get(r.show_id) || { gross: 0 };
+    if (r.last_day === null) { // 开账日只立基线，跨日后首次支付
+      db.prepare("UPDATE show_payouts SET cum = ?, last_day = ? WHERE show_id = ?").run(sold.gross, day, r.show_id);
+      continue;
+    }
+    const pool = (sold.gross - r.cum) + r.carry;
+    const pay = Math.max(0, Math.floor(pool / 2));
+    const carry = pool - pay * 2;
+    db.prepare("UPDATE show_payouts SET cum = ?, paid = paid + ?, carry = ?, last_day = ? WHERE show_id = ?")
+      .run(sold.gross, pay, carry, day, r.show_id);
+    if (pay > 0) {
+      db.prepare("UPDATE users SET passes = COALESCE(passes,0) + ? WHERE id = ?").run(pay, r.user_id);
+      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)")
+        .run(r.user_id, pay, `小靡专场票房分成 ·《${r.title}》(${r.last_day || "开账"}→${day})`, nowStr());
+    }
+  }
+  return rows.length;
+}
+const friendList = (uid) => db.prepare(`SELECT u.id, u.email, u.name, f.at AS friend_since
+  FROM friends f JOIN users u ON u.id = f.friend_id WHERE f.user_id = ? ORDER BY f.at DESC`).all(uid);
+const roomMembers = (rid) => db.prepare(`SELECT m.user_id AS id, m.name, m.pos AS time, m.playing, m.last_seen
+  FROM room_members m WHERE m.room_id = ? ORDER BY m.last_seen DESC`).all(rid).map((m) => ({ ...m, playing: !!m.playing }));
+const stageList = () => db.prepare(`SELECT s.id, s.theme, s.title, s.script, s.fallback, s.created_at, s.pinned,
+    s.user_id AS owner_id, COALESCE(u.name, '') AS owner_name,
+    (SELECT COUNT(*) FROM show_tickets t WHERE t.show_id = s.id) AS tickets_sold,
+    (SELECT COALESCE(SUM(t.price),0) FROM show_tickets t WHERE t.show_id = s.id) AS gross,
+    COALESCE(p.paid,0) AS paid_out, COALESCE(p.carry,0) AS carry
+  FROM shows s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN show_payouts p ON p.show_id = s.id
+  WHERE s.shareholder = 1 ORDER BY s.pinned DESC, s.id DESC LIMIT 50`).all();
 const PASS_PACKS = { small: { n: 5, label: "通行包·小" }, mid: { n: 12, label: "通行包·中" }, large: { n: 30, label: "通行包·大" } };
 
 // one-time migration of legacy JSONL archive
@@ -578,13 +650,14 @@ http.createServer((req, res) => {
       if (!email || !password) return send(400, JSON.stringify({ error: "email and password required" }));
       if (password.length < 6) return send(400, JSON.stringify({ error: "password too short (min 6)" }));
       if (db.prepare("SELECT id FROM users WHERE LOWER(email) = ?").get(email)) return send(409, JSON.stringify({ error: "email already registered" }));
-      const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin) VALUES (?, ?, ?)").run(email, hashPass(password), email === ADMIN_EMAIL ? 1 : 0);
+      const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin, passes) VALUES (?, ?, ?, ?)").run(email, hashPass(password), email === ADMIN_EMAIL ? 1 : 0, 10);
+      db.prepare("INSERT INTO pass_ledger (user_id, delta, reason, at) VALUES (?,?,?,?)").run(info.lastInsertRowid, 10, "注册赠送", nowStr());
       const token = crypto.randomBytes(32).toString("hex");
       const ip = clientIp(req.headers);
       db.prepare("INSERT INTO sessions (token, user_id, ip, ua) VALUES (?, ?, ?, ?)").run(token, info.lastInsertRowid, ip, clientUa(req.headers));
       db.prepare("UPDATE users SET last_login = datetime('now'), last_ip = ? WHERE id = ?").run(ip, info.lastInsertRowid);
       logEvent("register", info.lastInsertRowid, email, req.headers);
-      send(200, JSON.stringify({ token, user: pubUser({ id: info.lastInsertRowid, email, is_admin: email === ADMIN_EMAIL }) }), null, { "set-cookie": cookieFor(token) });
+      send(200, JSON.stringify({ token, user: pubUser({ id: info.lastInsertRowid, email, is_admin: email === ADMIN_EMAIL, passes: 10 }) }), null, { "set-cookie": cookieFor(token) });
     });
   }
   if (p === "/api/auth/login" && req.method === "POST") {
@@ -726,6 +799,188 @@ http.createServer((req, res) => {
       send(200, JSON.stringify({ ok: true, name: row.name, gender: row.gender, lang: row.lang || "zh" }));
     });
   }
+  // ---- API: 社交 · 好友（账号级关系，云端唯一；换机/网页/App 一致）----
+  if (p === "/api/friends" && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return send(200, JSON.stringify({ friends: friendList(user.id) }));
+  }
+  if (p === "/api/friends" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const email = String(body.email || "").trim().toLowerCase();
+      if (!email) return send(400, JSON.stringify({ error: "email required" }));
+      const target = db.prepare("SELECT id, email FROM users WHERE LOWER(email) = ?").get(email);
+      if (!target) return send(404, JSON.stringify({ error: "user not found" }));
+      if (target.id === user.id) return send(400, JSON.stringify({ error: "cannot add yourself" }));
+      // 双向：同看需要彼此可见
+      db.prepare("INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)").run(user.id, target.id);
+      db.prepare("INSERT OR IGNORE INTO friends (user_id, friend_id) VALUES (?, ?)").run(target.id, user.id);
+      send(200, JSON.stringify({ friends: friendList(user.id) }));
+    });
+  }
+  let mFr = p.match(/^\/api\/friends\/(\d+)$/);
+  if (mFr && req.method === "DELETE") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    const fid = Number(mFr[1]);
+    db.prepare("DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)").run(user.id, fid, fid, user.id);
+    return send(200, JSON.stringify({ ok: true, friends: friendList(user.id) }));
+  }
+
+  // ---- API: 剧场经济 · 小靡专场（票款/票房/分成只由服务端改）----
+  if (p === "/api/shows/mine" && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    const row = db.prepare("SELECT id, theme, title, script, fallback, shareholder, pinned, created_at FROM shows WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(user.id);
+    return send(200, JSON.stringify({ show: row || null, reused: !!row }));
+  }
+  if (p === "/api/shows" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const theme = String(body.theme || "").slice(0, 40) || "日常生活";
+      const script = String(body.script || "").slice(0, 8000);
+      const title = String(body.title || "").slice(0, 40) || (theme + "之夜");
+      if (script.length < 20) return send(400, JSON.stringify({ error: "script required" }));
+      const info = db.prepare("INSERT INTO shows (user_id, theme, title, script, fallback, shareholder, created_at) VALUES (?,?,?,?,?,0,?)")
+        .run(user.id, theme, title, script, body.fallback ? 1 : 0, nowStr());
+      const show = db.prepare("SELECT id, theme, title, script, fallback, shareholder, pinned, created_at FROM shows WHERE id = ?").get(info.lastInsertRowid);
+      send(200, JSON.stringify({ show, reused: false }));
+    });
+  }
+  let mSh = p.match(/^\/api\/shows\/(\d+)\/shareholder$/);
+  if (mSh && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const id = Number(mSh[1]);
+      const on = !!body.on;
+      const any = db.prepare("SELECT id, user_id FROM shows WHERE id = ?").get(id);
+      if (!any) return send(404, JSON.stringify({ error: "show not found" }));
+      if (any.user_id !== user.id) return send(403, JSON.stringify({ error: "not your show" }));
+      db.prepare("UPDATE shows SET shareholder = ? WHERE id = ?").run(on ? 1 : 0, id);
+      // 签约即开分账账本（幂等）；解约再签不重置累计票房
+      if (on) db.prepare("INSERT OR IGNORE INTO show_payouts (show_id, user_id) VALUES (?, ?)").run(id, user.id);
+      send(200, JSON.stringify({ ok: true, shareholder: on }));
+    });
+  }
+  if (p === "/api/stage/shows" && req.method === "GET") {
+    settleShowPayouts();
+    return send(200, JSON.stringify({ shows: stageList(), day: localDayStr() }));
+  }
+  if (p === "/api/stage/buy" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const id = Number(body.show_id);
+      const key = String(body.key || "").slice(0, 80);
+      if (!key) return send(400, JSON.stringify({ error: "key required" }));
+      const show = db.prepare("SELECT id, title FROM shows WHERE id = ? AND shareholder = 1").get(id);
+      if (!show) return send(404, JSON.stringify({ error: "show not found" }));
+      const soldNow = () => (db.prepare("SELECT COUNT(*) AS n FROM show_tickets WHERE show_id = ?").get(id) || { n: 0 }).n;
+      const prior = db.prepare("SELECT * FROM show_tickets WHERE spend_key = ?").get(key);
+      if (prior) {
+        if (prior.buyer_id !== user.id) return send(409, JSON.stringify({ error: "key collision" }));
+        return send(200, JSON.stringify({ ok: true, passes: currentPasses(user.id), tickets_sold: soldNow(), deduped: true }));
+      }
+      settleShowPayouts();
+      const bal = currentPasses(user.id);
+      if (bal < 1) return send(402, JSON.stringify({ error: "insufficient_passes", passes: bal, price: 1 }));
+      db.prepare("UPDATE users SET passes = COALESCE(passes,0) - 1 WHERE id = ?").run(user.id);
+      db.prepare("INSERT INTO pass_ledger (user_id,delta,reason,at) VALUES (?,?,?,?)").run(user.id, -1, `购买小靡专场门票 #${id}`, nowStr());
+      db.prepare("INSERT INTO show_tickets (show_id, buyer_id, price, spend_key, at) VALUES (?,?,?,?,?)").run(id, user.id, 1, key, nowStr());
+      logEvent("buy", user.id, user.email, req.headers);
+      send(200, JSON.stringify({ ok: true, passes: bal - 1, tickets_sold: soldNow(), key }));
+    });
+  }
+
+  // ---- API: 放映房间（跨机同看：房间与进度在云端，客户端轮询 state）----
+  if (p === "/api/rooms/join" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const filmId = String(body.filmId || "");
+      if (!filmId) return send(400, JSON.stringify({ error: "filmId required" }));
+      const fresh = db.prepare("SELECT * FROM rooms WHERE film_id = ? AND created_at > datetime('now','-6 hours') ORDER BY created_at DESC LIMIT 1").get(filmId);
+      let room = fresh;
+      if (!room) {
+        const rid = crypto.randomBytes(4).toString("hex");
+        db.prepare("INSERT INTO rooms (id, film_id, film_title, plane_name) VALUES (?,?,?,?)")
+          .run(rid, filmId, String(body.filmTitle || "").slice(0, 120), String(body.planeName || "").slice(0, 60));
+        room = { id: rid };
+      }
+      const nm = String(user.name || String(user.email).split("@")[0]).slice(0, 24);
+      db.prepare("INSERT OR REPLACE INTO room_members (room_id,user_id,name,pos,playing,last_seen) VALUES (?,?,?,COALESCE((SELECT pos FROM room_members WHERE room_id=? AND user_id=?),0),0,?)")
+        .run(room.id, user.id, nm, room.id, user.id, nowStr());
+      send(200, JSON.stringify({ roomId: room.id, members: roomMembers(room.id) }));
+    });
+  }
+  if (p === "/api/rooms/progress" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const rid = String(body.roomId || "");
+      const mem = db.prepare("SELECT * FROM room_members WHERE room_id = ? AND user_id = ?").get(rid, user.id);
+      if (!mem) return send(403, JSON.stringify({ error: "not in room" }));
+      db.prepare("UPDATE room_members SET pos = ?, playing = ?, last_seen = ? WHERE room_id = ? AND user_id = ?")
+        .run(Math.max(0, Number(body.time) || 0), body.playing ? 1 : 0, nowStr(), rid, user.id);
+      send(200, JSON.stringify({ ok: true }));
+    });
+  }
+  if (p === "/api/rooms/leave" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const rid = String(body.roomId || "");
+      db.prepare("DELETE FROM room_members WHERE room_id = ? AND user_id = ?").run(rid, user.id);
+      const left = db.prepare("SELECT COUNT(*) AS n FROM room_members WHERE room_id = ?").get(rid) || { n: 0 };
+      if (!left.n) { db.prepare("DELETE FROM rooms WHERE id = ?").run(rid); db.prepare("DELETE FROM whispers WHERE room_id = ?").run(rid); }
+      send(200, JSON.stringify({ ok: true }));
+    });
+  }
+  if (p === "/api/rooms/whisper" && req.method === "POST") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const rid = String(body.roomId || "");
+      const text = String(body.text || "").slice(0, 120);
+      if (!rid || !text) return send(400, JSON.stringify({ error: "roomId and text required" }));
+      const mem = db.prepare("SELECT 1 AS x FROM room_members WHERE room_id = ? AND user_id = ?").get(rid, user.id);
+      if (!mem) return send(403, JSON.stringify({ error: "not in room" }));
+      const nm = String(user.name || String(user.email).split("@")[0]).slice(0, 24);
+      const info = db.prepare("INSERT INTO whispers (room_id,user_id,name,text,at) VALUES (?,?,?,?,?)").run(rid, user.id, nm, text, Date.now());
+      send(200, JSON.stringify({ ok: true, id: info.lastInsertRowid }));
+    });
+  }
+  let mRm = p.match(/^\/api\/rooms\/([a-z0-9]+)\/state$/);
+  if (mRm && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    const rid = mRm[1];
+    const since = Number(u.searchParams.get("since") || 0);
+    // 2 分钟无心跳视为离场（浏览器崩了也不会留幽灵观众）
+    db.prepare("DELETE FROM room_members WHERE room_id = ? AND last_seen < ?").run(rid, new Date(Date.now() + 8 * 3600e3 - 120e3).toISOString().slice(0, 19).replace("T", " "));
+    const whispers = db.prepare("SELECT id,user_id,name,text,at FROM whispers WHERE room_id = ? AND id > ? ORDER BY id ASC LIMIT 50").all(rid, since);
+    return send(200, JSON.stringify({ roomId: rid, members: roomMembers(rid), whispers, serverTime: Date.now() }));
+  }
+
+  // ---- API: 存档快照（游戏进度上云；本地仍是缓存，换机可恢复）----
+  if (p === "/api/save" && req.method === "GET") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    const row = db.prepare("SELECT data, updated_at FROM user_saves WHERE user_id = ?").get(user.id);
+    let data = null;
+    try { data = row ? JSON.parse(row.data) : null; } catch { data = null; }
+    return send(200, JSON.stringify({ data, updated_at: row ? row.updated_at : null }));
+  }
+  if (p === "/api/save" && req.method === "PUT") {
+    if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+    return readBody().then(() => {
+      const blob = JSON.stringify(body.data || {});
+      if (blob.length > 400000) return send(413, JSON.stringify({ error: "save too large" }));
+      const cur = db.prepare("SELECT updated_at FROM user_saves WHERE user_id = ?").get(user.id);
+      const clientTs = String(body.client_ts || "");
+      if (cur && clientTs && String(cur.updated_at) > clientTs) {
+        // 云端更新：拒绝覆盖，把云端那份还给客户端
+        let server = null;
+        try { server = JSON.parse((db.prepare("SELECT data FROM user_saves WHERE user_id = ?").get(user.id) || {}).data || "null"); } catch {}
+        return send(409, JSON.stringify({ error: "stale_save", updated_at: cur.updated_at, data: server }));
+      }
+      db.prepare("INSERT INTO user_saves (user_id,data,updated_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at")
+        .run(user.id, blob, nowStr());
+      send(200, JSON.stringify({ ok: true, updated_at: nowStr() }));
+    });
+  }
+
   // 价目同步：只允许管理员推 manifest（价目决定扣费，普通客户端不能改）
   if (p === "/api/admin/manifest" && req.method === "POST") {
     if (!user || !user.is_admin) {
@@ -848,7 +1103,11 @@ http.createServer((req, res) => {
     return send(200, adminPage(rows, obsData()), "text/html; charset=utf-8", { "cache-control": "no-store" });
   }
 
-  // default: anonymous intake (legacy path used by creators.html)
+  // 未匹配路径：只有投稿入口才走匿名收集，其余一律 404
+  //（否则任何打错的 POST 都会被当成投稿，还会撞上投稿限流回一个莫名其妙的 429）
+  if (req.method !== "POST" || (p !== "/" && p !== "/submit")) {
+    return send(404, JSON.stringify({ error: "not found", path: p }));
+  }
   return handleAnonPost();
 
   function handleAnonPost() {
