@@ -1090,6 +1090,11 @@ http.createServer((req, res) => {
 
   const p = u.pathname.replace(/^\/pc-submit/, "") || "/";
   const user = userByReq(req.headers);
+  // 站点入口：/pc-submit 与 /pc-submit/ 直接进账号页（原先落到 404）
+  if (p === "/" && req.method === "GET") {
+    res.writeHead(302, { location: "/pc-submit/account", "cache-control": "no-store" });
+    return res.end();
+  }
 
   // ---- API: auth (App wire-compatible) ----
   let body = null;
