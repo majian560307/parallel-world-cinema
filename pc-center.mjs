@@ -30,6 +30,8 @@ const VERIFY_TTL_H = Number(process.env.VERIFY_TTL_H || 24);
 const SIGNUP_BONUS = Number(process.env.SIGNUP_BONUS || 5);
 // REQUIRE_EMAIL_VERIFY=1：注册不发通证，点邮件确认后才发；=0：注册即发（邮件通道未就绪时的过渡态）
 const REQUIRE_VERIFY = String(process.env.REQUIRE_EMAIL_VERIFY || "1") !== "0";
+// 跨站单点登录：与米仓 Granary 共享的内部密钥（未配则内部接口直接 404，等于关闭）
+const SSO_SECRET = String(process.env.SSO_SECRET || "");
 const RESERVED_TLDS = new Set(["invalid", "test", "local", "localhost", "example", "internal", "lan", "home", "corp", "arpa"]);
 const MX_CACHE = new Map();
 const signupIp = new Map();  // ip -> [ts]
@@ -1099,6 +1101,38 @@ http.createServer((req, res) => {
   // ---- API: auth (App wire-compatible) ----
   let body = null;
   const readBody = () => new Promise((done) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { try { body = JSON.parse(b || "{}"); } catch { body = {}; } done(); }); });
+
+  // ---- API: 内部单点登录（只对本机回环 + 共享密钥开放，米仓 Granary 调）----
+  if (p.startsWith("/api/internal/")) {
+    const fromLocal = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(String(req.socket.remoteAddress || ""));
+    const given = String(req.headers["x-sso-secret"] || "");
+    if (!SSO_SECRET || !fromLocal || given !== SSO_SECRET) return send(404, JSON.stringify({ error: "not found" }));
+    // 验票：把浏览器带来的 pwc_token 换成「我是谁」
+    if (p === "/api/internal/sso/whoami" && req.method === "GET") {
+      if (!user) return send(401, JSON.stringify({ error: "not authenticated" }));
+      return send(200, JSON.stringify({ user: pubUser(user) }));
+    }
+    // 认领：米仓老账号（本地有密码、影城还没有）首次登录时把账号建过来，密码照旧可用
+    if (p === "/api/internal/sso/upsert" && req.method === "POST") {
+      return readBody().then(() => {
+        const email = String(body.email || "").trim().toLowerCase().slice(0, 190);
+        const password = String(body.password || "");
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return send(400, JSON.stringify({ error: "bad_email" }));
+        if (password.length < 6) return send(400, JSON.stringify({ error: "password too short (min 6)" }));
+        const ex = db.prepare("SELECT * FROM users WHERE LOWER(email) = ?").get(email);
+        if (ex) return send(200, JSON.stringify({ created: false, user: pubUser(ex) }));
+        const isAdmin = email === ADMIN_EMAIL ? 1 : 0;
+        const info = db.prepare("INSERT INTO users (email, pass_hash, is_admin, passes, email_verified, signup_ip) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(email, hashPass(password), isAdmin, 0, 1, clientIp(req.headers));
+        const uid = Number(info.lastInsertRowid);
+        if (SIGNUP_BONUS) creditPasses(uid, SIGNUP_BONUS, { kind: "green", unitCash: 0, source: "signup", reason: "首注礼 · 仅看片", days: PROMO.greenDays });
+        logEvent("sso_upsert", uid, email, req.headers);
+        const fresh = db.prepare("SELECT * FROM users WHERE id = ?").get(uid);
+        return send(200, JSON.stringify({ created: true, user: pubUser(fresh) }));
+      }).catch((e) => send(500, JSON.stringify({ error: "upsert failed", detail: String((e && e.message) || e).slice(0, 140) })));
+    }
+    return send(404, JSON.stringify({ error: "not found" }));
+  }
 
   if (p === "/api/auth/register" && req.method === "POST") {
     return readBody().then(async () => {
